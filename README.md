@@ -20,12 +20,18 @@ Pre-built binaries are published on the
 No Node, Python, terminal, or developer tools required — download the
 file for your OS, double-click it, and the app opens in your browser.
 
-| Platform              | File                       |
-| --------------------- | -------------------------- |
-| Windows (x64)         | `yt-mp3-windows-x64.exe`   |
-| macOS (Apple Silicon) | `yt-mp3-macos-arm64`       |
-| macOS (Intel)         | `yt-mp3-macos-x64`         |
-| Linux (x64)           | `yt-mp3-linux-x64`         |
+| Platform              | File                                       |
+| --------------------- | ------------------------------------------ |
+| Windows (x64)         | `yt-mp3-windows-x64.exe`                   |
+| macOS (Apple Silicon) | `yt-mp3-macos-arm64`                       |
+| macOS (Intel)         | use `yt-mp3-macos-arm64` via Rosetta 2 [^1] |
+| Linux (x64)           | `yt-mp3-linux-x64`                         |
+
+[^1]: Apple stopped selling Intel Macs in late 2020. We don't ship a
+native Intel build because GitHub's Intel Mac CI runners have multi-hour
+queue times that block every release. Rosetta 2 will offer to install
+itself the first time you launch the arm64 binary on Intel — accept and
+you're done. The performance hit is negligible for this workload.
 
 Each binary is ~80–110 MB. It bundles its own Node runtime and a
 matching yt-dlp binary, so it has no external dependencies.
@@ -91,7 +97,7 @@ To rebuild the standalone binary for your platform:
 ```sh
 bun run package:win        # → dist/yt-mp3.exe
 bun run package:mac-arm64  # → dist/yt-mp3-macos-arm64
-bun run package:mac-x64    # → dist/yt-mp3-macos-x64
+bun run package:mac-x64    # → dist/yt-mp3-macos-x64  (still works locally on an Intel Mac; not built in CI)
 bun run package:linux      # → dist/yt-mp3-linux
 ```
 

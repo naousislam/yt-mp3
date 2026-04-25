@@ -78,11 +78,15 @@ jobs:
             # The staging step picks the first hit.
             artifact_glob: dist/yt-mp3*
             artifact_name: yt-mp3-macos-arm64
-          - label: macos-x64
-            os: macos-13 # macos-13 is the last Intel runner image
-            script: package:mac-x64
-            artifact_glob: dist/yt-mp3*
-            artifact_name: yt-mp3-macos-x64
+          # Intel macOS (macos-13) was dropped from the build matrix
+          # because GitHub's Intel Mac runner pool has shrunk to the
+          # point that queue times routinely exceed the rest of the
+          # workflow's runtime — sometimes by an hour or more — which
+          # blocked every release behind the slowest job. Anyone still
+          # on an Intel Mac (Apple stopped selling them in late 2020)
+          # can run the `macos-arm64` binary through Rosetta 2 with a
+          # negligible perf hit; the README's download table points
+          # them there explicitly.
           - label: linux-x64
             os: ubuntu-latest
             script: package:linux
@@ -215,7 +219,6 @@ jobs:
           files: |
             dist/yt-mp3-windows-x64.exe
             dist/yt-mp3-macos-arm64
-            dist/yt-mp3-macos-x64
             dist/yt-mp3-linux-x64
           # A short body shown above the auto-generated notes.
           # Keeps the user-facing instructions in front of the
@@ -229,10 +232,12 @@ jobs:
             | --- | --- |
             | Windows (x64) | `yt-mp3-windows-x64.exe` |
             | macOS (Apple Silicon) | `yt-mp3-macos-arm64` |
-            | macOS (Intel) | `yt-mp3-macos-x64` |
+            | macOS (Intel) | use `yt-mp3-macos-arm64` via Rosetta 2 |
             | Linux (x64) | `yt-mp3-linux-x64` |
 
             > **macOS / Linux:** make the binary executable first with `chmod +x yt-mp3-*` if it isn't already. macOS may also block the first launch under Gatekeeper — right-click → Open, or run `xattr -d com.apple.quarantine yt-mp3-macos-*`.
+            >
+            > **Intel Mac users:** Rosetta 2 will offer to install the first time you launch the arm64 binary; accept and you're done.
 
             ---
         env:
