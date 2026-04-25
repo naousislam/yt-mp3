@@ -25,6 +25,6 @@
   },
   "dependencies": {
     "@breezystack/lamejs": "^1.2.7",
-    "@distube/ytdl-core": "^4.16.4"
+    "youtubei.js": "^17.0.1"
   }
 }

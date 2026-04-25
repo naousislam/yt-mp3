@@ -34,6 +34,11 @@ Thumbs.db
 # Bun cache
 .bun
 
+# Debug player-script dumps that ytdl-core writes to the project root
+# whenever it fails to parse YouTube's signature cipher. Harmless but
+# noisy in `git status`.
+*-player-script.js
+
 # Other lockfiles (we use bun, so bun.lockb should be committed)
 package-lock.json
 yarn.lock

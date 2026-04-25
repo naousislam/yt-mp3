@@ -4,41 +4,42 @@ import {
   MAX_DURATION_SECONDS,
   sanitizeFilename,
 } from "$lib/youtube";
-import { toYtdlCookies, type Cookie } from "$lib/cookies";
 import type { InfoResponse } from "$lib/api-types";
 import type { RequestHandler } from "./$types";
 
-const YT_HEADERS = {
-  // A modern desktop UA helps avoid age-gate / consent walls.
-  "User-Agent":
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-  "Accept-Language": "en-US,en;q=0.9",
-};
+import { getInnertube } from "$lib/innertube";
 
 /**
- * Pick the best audio-only format from a list of ytdl formats.
+ * Pick the best audio-only format from a youtubei.js VideoInfo.
  *
- * We prefer the `mp4` container (which is how ytdl-core labels m4a / AAC
- * audio streams) because every browser's `decodeAudioData` handles AAC
- * reliably. WebM/Opus is used as a fallback when AAC isn't offered.
+ * youtubei.js exposes a `chooseFormat({ type: 'audio', quality: 'best' })`
+ * helper, but its scoring sometimes picks Opus over AAC even when both
+ * are present at the same bitrate. We do our own selection so we can
+ * mirror /api/info's preference for AAC (which every browser's Web
+ * Audio API decodes natively).
  */
 function pickBestAudioFormat<
   F extends {
-    hasAudio: boolean;
-    hasVideo: boolean;
-    url?: string;
-    container?: string;
-    audioBitrate?: number;
+    has_audio: boolean;
+    has_video: boolean;
+    mime_type?: string;
     bitrate?: number;
   },
 >(formats: F[]): F | null {
-  const audioOnly = formats.filter((f) => f.hasAudio && !f.hasVideo && f.url);
+  const audioOnly = formats.filter((f) => f.has_audio && !f.has_video);
   if (audioOnly.length === 0) return null;
 
   const score = (f: F): number => {
-    const containerScore =
-      f.container === "mp4" ? 1000 : f.container === "webm" ? 500 : 0;
-    const bitrate = f.audioBitrate ?? f.bitrate ?? 0;
+    // Prefer mp4a (AAC) over opus. Both decode in modern browsers, but
+    // AAC has slightly better support in older Safari versions and tends
+    // to produce smaller intermediate buffers during decode.
+    const mime = f.mime_type ?? "";
+    const containerScore = /mp4a/i.test(mime)
+      ? 1000
+      : /opus/i.test(mime)
+        ? 500
+        : 0;
+    const bitrate = f.bitrate ?? 0;
     return containerScore + bitrate;
   };
 
@@ -47,51 +48,20 @@ function pickBestAudioFormat<
   );
 }
 
-/**
- * Read the request body and pull out the `url` and optional `cookies`.
- * We accept either JSON (preferred) or a query parameter for `url` so
- * curl / browser address-bar testing still works during development.
- */
-async function parseRequest(
-  request: Request,
-  url: URL,
-): Promise<{
-  input: string | null;
-  cookies: Cookie[];
-}> {
+async function handleInfo(request: Request, url: URL): Promise<Response> {
+  // Accept JSON body (canonical) or `?url=` query (convenient for curl).
   let input: string | null = null;
-  let cookies: Cookie[] = [];
-
   if (request.method === "POST") {
     try {
-      const body = (await request.json()) as {
-        url?: unknown;
-        cookies?: unknown;
-      };
+      const body = (await request.json()) as { url?: unknown };
       if (typeof body?.url === "string") input = body.url;
-      if (Array.isArray(body?.cookies)) {
-        cookies = body.cookies.filter(
-          (c): c is Cookie =>
-            !!c &&
-            typeof c === "object" &&
-            typeof (c as Cookie).name === "string" &&
-            typeof (c as Cookie).value === "string",
-        );
-      }
     } catch {
-      // Empty / non-JSON body is fine — fall through to query params.
+      // Empty / non-JSON body — fall through to query string.
     }
   }
-
   if (!input) {
     input = url.searchParams.get("url") ?? url.searchParams.get("v");
   }
-
-  return { input, cookies };
-}
-
-async function handleInfo(request: Request, url: URL): Promise<Response> {
-  const { input, cookies } = await parseRequest(request, url);
 
   if (!input) {
     error(400, "Missing `url` field");
@@ -102,64 +72,67 @@ async function handleInfo(request: Request, url: URL): Promise<Response> {
     error(400, "Could not parse a YouTube video ID from the input");
   }
 
-  // Lazy-import ytdl-core so it isn't evaluated at module init time.
-  // ytdl-core touches `undici.Agent.compose` on import, and some runtimes
-  // (notably Bun's undici polyfill) don't implement that API yet — which
-  // would otherwise crash the SSR build. Importing here defers it to
-  // request time, where we're guaranteed to be on the Node serverless
-  // runtime configured above.
-  const ytdl = (await import("@distube/ytdl-core")).default;
-
-  // If the user supplied cookies, build a ytdl agent backed by them so the
-  // outbound googlevideo / innertube requests carry valid auth. Otherwise
-  // fall through to the unauthenticated path, which usually fails on
-  // Vercel IPs but is fine for local dev.
-  const agent =
-    cookies.length > 0 ? ytdl.createAgent(toYtdlCookies(cookies)) : undefined;
-
-  let info;
+  let yt: import("youtubei.js").Innertube;
   try {
-    info = await ytdl.getInfo(`https://www.youtube.com/watch?v=${videoId}`, {
-      requestOptions: { headers: YT_HEADERS },
-      agent,
-      // Try non-WEB clients first. YouTube applies its strictest anti-bot
-      // checks to the WEB player; the TV / iOS / Android clients are designed
-      // for third-party device contexts and tend to keep working from cloud
-      // IP ranges (Vercel, AWS, etc.) where WEB is blocked. ytdl-core walks
-      // this list in order and uses the first client that returns a usable
-      // response, so we keep WEB at the end as a final fallback.
-      playerClients: ["TV", "IOS", "ANDROID", "WEB_EMBEDDED", "WEB"],
-    });
+    yt = await getInnertube();
   } catch (e) {
     const message = e instanceof Error ? e.message : "Unknown error";
-    // Map common YouTube failure modes to clearer status codes.
+    console.error("[api/info] Innertube.create failed:", message);
+    error(502, `Failed to initialize YouTube client: ${message}`);
+  }
+
+  let info: import("youtubei.js").YT.VideoInfo;
+  try {
+    info = await yt.getInfo(videoId);
+  } catch (e) {
+    const message = e instanceof Error ? e.message : "Unknown error";
     if (/age/i.test(message)) {
       error(403, "This video is age-restricted and cannot be processed");
     }
-    if (/private|unavailable|removed|blocked/i.test(message)) {
+    if (/private|unavailable|removed|blocked|region/i.test(message)) {
       error(404, "This video is unavailable, private, or region-blocked");
     }
-    if (/sign in|confirm/i.test(message)) {
-      // Surface a custom code so the client can prompt the user to connect
-      // their YouTube account, instead of just showing a generic error.
+    if (/sign in|confirm|bot/i.test(message)) {
       error(
         401,
-        cookies.length > 0
-          ? "Your YouTube cookies were rejected. They may have expired — please reconnect."
-          : "YouTube is blocking this server's IP. Connect your YouTube account to continue.",
+        "YouTube is blocking this server's IP. Run the app locally on your home network instead.",
       );
     }
-    console.error("[api/info] ytdl.getInfo failed:", message);
+    console.error("[api/info] getInfo failed:", message);
     error(502, `Failed to fetch video info: ${message}`);
   }
 
-  const details = info.videoDetails;
+  const basic = info.basic_info;
 
-  if (details.isLiveContent) {
+  // Playability status surfaces age-gates, geographic blocks, and the
+  // generic "this video is not available" wall before we even look at
+  // the streaming data.
+  const playability = info.playability_status;
+  if (playability && playability.status !== "OK") {
+    const reason =
+      playability.reason ??
+      playability.error_screen?.toString?.() ??
+      playability.status;
+    if (/age/i.test(String(reason))) {
+      error(403, "This video is age-restricted and cannot be processed");
+    }
+    if (/private|unavailable|region|country/i.test(String(reason))) {
+      error(404, `This video is not playable: ${reason}`);
+    }
+    if (/sign in|confirm|bot/i.test(String(reason))) {
+      error(
+        401,
+        "YouTube is blocking this server's IP. Run the app locally on your home network instead.",
+      );
+    }
+    error(400, `Video is not playable: ${reason}`);
+  }
+
+  if (basic.is_live) {
     error(400, "Live streams are not supported");
   }
 
-  const durationSeconds = Number(details.lengthSeconds) || 0;
+  const durationSeconds = basic.duration ?? 0;
   if (durationSeconds <= 0) {
     error(400, "Could not determine the duration of this video");
   }
@@ -170,12 +143,16 @@ async function handleInfo(request: Request, url: URL): Promise<Response> {
     );
   }
 
-  const format = pickBestAudioFormat(info.formats);
-  if (!format || !format.url) {
+  // youtubei.js splits formats into `formats` (combined) and
+  // `adaptive_formats` (per-stream). Audio-only streams live in
+  // `adaptive_formats`.
+  const formats = info.streaming_data?.adaptive_formats ?? [];
+  const format = pickBestAudioFormat(formats);
+  if (!format) {
     error(502, "No suitable audio stream was found for this video");
   }
 
-  const thumbnails = details.thumbnails ?? [];
+  const thumbnails = basic.thumbnail ?? [];
   const thumbnail =
     thumbnails.length > 0
       ? thumbnails.reduce((best, t) =>
@@ -183,25 +160,35 @@ async function handleInfo(request: Request, url: URL): Promise<Response> {
         ).url
       : `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
 
-  const codec = (() => {
-    const match = (format.mimeType ?? "").match(/codecs="([^"]+)"/);
-    return match ? match[1] : "";
-  })();
+  const mimeType = format.mime_type ?? "";
+  const codecMatch = mimeType.match(/codecs="([^"]+)"/);
+  const codec = codecMatch ? codecMatch[1] : "";
+  // Container portion of "audio/mp4; codecs=…" → "mp4".
+  const containerMatch = mimeType.match(/^audio\/(\w+)/i);
+  const container = containerMatch ? containerMatch[1].toLowerCase() : "";
 
   const response: InfoResponse = {
     id: videoId,
-    title: details.title,
-    author: details.author?.name ?? "Unknown",
+    title: basic.title ?? "Untitled",
+    author: basic.author ?? basic.channel?.name ?? "Unknown",
     durationSeconds,
     thumbnail,
-    filename: sanitizeFilename(details.title),
+    filename: sanitizeFilename(basic.title ?? "audio"),
     format: {
       itag: format.itag,
-      mimeType: format.mimeType ?? "",
-      container: format.container ?? "",
+      mimeType,
+      container,
       codec,
-      bitrate: format.audioBitrate ?? format.bitrate ?? 0,
-      contentLength: format.contentLength ? Number(format.contentLength) : null,
+      // youtubei.js reports the source bitrate in bits per second,
+      // while ytdl-core reported kbps. Normalize to kbps for the UI.
+      bitrate:
+        typeof format.bitrate === "number"
+          ? Math.round(format.bitrate / 1000)
+          : 0,
+      contentLength:
+        typeof format.content_length === "number"
+          ? format.content_length
+          : null,
     },
   };
 
@@ -212,14 +199,11 @@ async function handleInfo(request: Request, url: URL): Promise<Response> {
   });
 }
 
-// POST is the canonical entry point — it lets the client send cookies in
-// the body (avoiding URL-length and header-size limits) and keeps auth data
-// out of server access logs.
+// POST is the canonical entry point — keeps auth-style data (if ever
+// added later) out of URL query strings and server access logs.
 export const POST: RequestHandler = ({ request, url }) =>
   handleInfo(request, url);
 
-// GET is kept for convenience during local dev / curl testing. It can't be
-// used with cookies (we don't accept them in query params for security
-// reasons), so it's only useful for unauthenticated requests.
+// GET is kept for convenience during local dev / curl testing.
 export const GET: RequestHandler = ({ request, url }) =>
   handleInfo(request, url);

@@ -1,36 +1,35 @@
 import { error } from "@sveltejs/kit";
 import { extractVideoId, MAX_DURATION_SECONDS } from "$lib/youtube";
-import { toYtdlCookies, toCookieHeader, type Cookie } from "$lib/cookies";
+import { getInnertube } from "$lib/innertube";
 import type { RequestHandler } from "./$types";
 
 /**
- * Pick the best audio-only format. Mirrors the logic in /api/info so that
- * the format streamed here matches the metadata advertised to the client.
- *
- * Generic over the format shape so we don't need to import the ytdl-core
- * types at module top level (see comment in the handler below).
+ * Pick the best audio-only format from a youtubei.js VideoInfo's
+ * `adaptive_formats` list. Mirrors the logic in /api/info so the
+ * streamed bytes match the metadata we advertised to the client.
  */
 function pickBestAudioFormat<
   F extends {
-    hasAudio: boolean;
-    hasVideo: boolean;
-    url?: string;
-    container?: string;
-    audioBitrate?: number;
+    has_audio: boolean;
+    has_video: boolean;
+    mime_type?: string;
     bitrate?: number;
-    mimeType?: string;
-    itag?: number;
   },
 >(formats: F[]): F | null {
-  const audioOnly = formats.filter((f) => f.hasAudio && !f.hasVideo && f.url);
+  const audioOnly = formats.filter((f) => f.has_audio && !f.has_video);
   if (audioOnly.length === 0) return null;
 
   const score = (f: F): number => {
-    // Prefer mp4 (which is how ytdl-core labels m4a/AAC streams) since
-    // browsers decode AAC reliably. Fall back to webm/opus otherwise.
-    const containerScore =
-      f.container === "mp4" ? 1000 : f.container === "webm" ? 500 : 0;
-    const bitrate = f.audioBitrate ?? f.bitrate ?? 0;
+    // Prefer mp4a (AAC) over opus to match /api/info; both decode in
+    // modern browsers but AAC has slightly broader support and tends
+    // to produce smaller intermediate buffers during decode.
+    const mime = f.mime_type ?? "";
+    const containerScore = /mp4a/i.test(mime)
+      ? 1000
+      : /opus/i.test(mime)
+        ? 500
+        : 0;
+    const bitrate = f.bitrate ?? 0;
     return containerScore + bitrate;
   };
 
@@ -39,71 +38,35 @@ function pickBestAudioFormat<
   );
 }
 
-const YT_HEADERS = {
-  "User-Agent":
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-  "Accept-Language": "en-US,en;q=0.9",
-};
-
 /**
- * Read the request body and pull out the `url` and optional `cookies`.
- * Accepts JSON for POST (the canonical path) or query params for GET so
- * curl / address-bar testing still works during local development.
+ * Proxies the raw (compressed) audio bytes from googlevideo to the
+ * browser.
  *
- * Cookies are deliberately not accepted via query string — they should
- * never appear in URLs (server access logs, browser history, Referer
- * headers, etc.).
+ * This server hop is unavoidable: googlevideo URLs are signed,
+ * short-lived, and do not send permissive CORS headers, so the browser
+ * cannot fetch them directly. We resolve a fresh URL on every request
+ * (rather than trusting one the client received from /api/info)
+ * because those URLs expire quickly.
+ *
+ * youtubei.js's `MediaInfo.download()` handles signature deciphering
+ * and the `n` parameter transformation internally, then returns a
+ * `ReadableStream<Uint8Array>` we can pipe straight back to the
+ * browser. The actual MP3 transcoding happens entirely on the client.
  */
-async function parseRequest(
-  request: Request,
-  url: URL,
-): Promise<{
-  input: string | null;
-  cookies: Cookie[];
-}> {
+async function handleStream(request: Request, url: URL): Promise<Response> {
+  // Accept JSON body (canonical) or `?url=` query (convenient for curl).
   let input: string | null = null;
-  let cookies: Cookie[] = [];
-
   if (request.method === "POST") {
     try {
-      const body = (await request.json()) as {
-        url?: unknown;
-        cookies?: unknown;
-      };
+      const body = (await request.json()) as { url?: unknown };
       if (typeof body?.url === "string") input = body.url;
-      if (Array.isArray(body?.cookies)) {
-        cookies = body.cookies.filter(
-          (c): c is Cookie =>
-            !!c &&
-            typeof c === "object" &&
-            typeof (c as Cookie).name === "string" &&
-            typeof (c as Cookie).value === "string",
-        );
-      }
     } catch {
-      // Empty / non-JSON body is fine — fall through to query params.
+      // Empty / non-JSON body — fall through to query string.
     }
   }
-
   if (!input) {
     input = url.searchParams.get("url") ?? url.searchParams.get("v");
   }
-
-  return { input, cookies };
-}
-
-/**
- * Proxies the raw (compressed) audio bytes from googlevideo to the browser.
- *
- * This server hop is unavoidable: googlevideo URLs are signed, short-lived,
- * and do not send permissive CORS headers, so the browser cannot fetch them
- * directly. We resolve a fresh URL on every request (rather than trusting one
- * the client received from /api/info) because those URLs expire quickly.
- *
- * The actual MP3 transcoding happens entirely on the client.
- */
-async function handleStream(request: Request, url: URL): Promise<Response> {
-  const { input, cookies } = await parseRequest(request, url);
 
   if (!input) {
     error(400, "Missing `url` field");
@@ -114,55 +77,37 @@ async function handleStream(request: Request, url: URL): Promise<Response> {
     error(400, "Could not parse a YouTube video ID from the input");
   }
 
-  // Lazy-import ytdl-core so it isn't evaluated at module init time.
-  // ytdl-core touches `undici.Agent.compose` on import, and some runtimes
-  // (notably Bun's undici polyfill) don't implement that API yet — which
-  // would otherwise crash the SSR build. Importing here defers it to
-  // request time, where we're guaranteed to be on the Node serverless
-  // runtime configured above.
-  const ytdl = (await import("@distube/ytdl-core")).default;
-
-  // If the user supplied cookies, build a ytdl agent backed by them so the
-  // innertube call carries valid auth. The googlevideo download below also
-  // gets the cookies attached as a `Cookie:` header.
-  const agent =
-    cookies.length > 0 ? ytdl.createAgent(toYtdlCookies(cookies)) : undefined;
-
-  let info;
+  let yt: import("youtubei.js").Innertube;
   try {
-    info = await ytdl.getInfo(`https://www.youtube.com/watch?v=${videoId}`, {
-      requestOptions: { headers: YT_HEADERS },
-      agent,
-      // Try non-WEB clients first. YouTube applies its strictest anti-bot
-      // checks to the WEB player; the TV / iOS / Android clients are designed
-      // for third-party device contexts and tend to keep working from cloud
-      // IP ranges (Vercel, AWS, etc.) where WEB is blocked. ytdl-core walks
-      // this list in order and uses the first client that returns a usable
-      // response, so we keep WEB at the end as a final fallback. This list
-      // must match the one in /api/info so the format selection stays in sync.
-      playerClients: ["TV", "IOS", "ANDROID", "WEB_EMBEDDED", "WEB"],
-    });
+    yt = await getInnertube();
   } catch (e) {
     const message = e instanceof Error ? e.message : "Unknown error";
-    if (/sign in|confirm/i.test(message)) {
+    console.error("[api/stream] Innertube.create failed:", message);
+    error(502, `Failed to initialize YouTube client: ${message}`);
+  }
+
+  let info: import("youtubei.js").YT.VideoInfo;
+  try {
+    info = await yt.getInfo(videoId);
+  } catch (e) {
+    const message = e instanceof Error ? e.message : "Unknown error";
+    if (/sign in|confirm|bot/i.test(message)) {
       error(
         401,
-        cookies.length > 0
-          ? "Your YouTube cookies were rejected. They may have expired — please reconnect."
-          : "YouTube is blocking this server's IP. Connect your YouTube account to continue.",
+        "YouTube is blocking this server's IP. Run the app locally on your home network instead.",
       );
     }
-    console.error("[api/stream] ytdl.getInfo failed:", message);
+    console.error("[api/stream] getInfo failed:", message);
     error(502, `Failed to resolve video: ${message}`);
   }
 
-  const details = info.videoDetails;
+  const basic = info.basic_info;
 
-  if (details.isLiveContent) {
+  if (basic.is_live) {
     error(400, "Live streams are not supported");
   }
 
-  const durationSeconds = Number(details.lengthSeconds) || 0;
+  const durationSeconds = basic.duration ?? 0;
   if (durationSeconds > MAX_DURATION_SECONDS) {
     error(
       413,
@@ -170,84 +115,77 @@ async function handleStream(request: Request, url: URL): Promise<Response> {
     );
   }
 
-  const format = pickBestAudioFormat(info.formats);
-  if (!format || !format.url) {
+  const formats = info.streaming_data?.adaptive_formats ?? [];
+  const format = pickBestAudioFormat(formats);
+  if (!format) {
     error(502, "No suitable audio stream was found for this video");
   }
 
-  // Forward Range header if present so the browser can resume / chunk if it wants.
-  const range = request.headers.get("range");
-  const upstreamHeaders: Record<string, string> = { ...YT_HEADERS };
-  if (range) upstreamHeaders.range = range;
-  if (cookies.length > 0) {
-    // googlevideo doesn't strictly require cookies to serve already-signed
-    // URLs, but attaching them keeps the request consistent with the
-    // innertube call above and avoids edge cases where YouTube rotates the
-    // signed URL based on session.
-    upstreamHeaders.cookie = toCookieHeader(cookies);
-  }
-
-  let upstream: Response;
+  // youtubei.js's `download()` resolves the signed URL, deciphers it,
+  // makes the actual googlevideo request, and gives us back a
+  // ReadableStream of the response body. We pin it to the same itag we
+  // selected above so the bytes match the metadata advertised by
+  // /api/info — youtubei.js would otherwise re-run its own format
+  // chooser on each call.
+  let audioStream: ReadableStream<Uint8Array>;
   try {
-    upstream = await fetch(format.url, {
-      headers: upstreamHeaders,
-      // Don't follow redirects to a different origin without thinking about it,
-      // but ytdl-core has already resolved a direct googlevideo URL.
-      redirect: "follow",
+    audioStream = await info.download({
+      type: "audio",
+      itag: format.itag,
     });
   } catch (e) {
     const message = e instanceof Error ? e.message : "Unknown error";
-    console.error("[api/stream] upstream fetch failed:", message);
-    error(502, `Failed to connect to the audio source: ${message}`);
+    if (/sign in|confirm|bot/i.test(message)) {
+      error(
+        401,
+        "YouTube is blocking this server's IP. Run the app locally on your home network instead.",
+      );
+    }
+    console.error("[api/stream] download() failed:", message);
+    error(502, `Failed to fetch audio stream: ${message}`);
   }
 
-  if (!upstream.ok && upstream.status !== 206) {
-    console.error("[api/stream] upstream returned", upstream.status);
-    error(502, `Audio source returned status ${upstream.status}`);
-  }
-
-  if (!upstream.body) {
-    error(502, "Audio source returned an empty response");
-  }
-
-  // Build response headers that pass useful info through but strip
-  // anything that would leak googlevideo internals.
+  // Build response headers. Content-Length comes from the format
+  // metadata so the client can render an accurate progress bar; we
+  // can't pull it from the upstream response because youtubei.js
+  // hides the underlying fetch.
   const headers = new Headers();
-  const passthrough = [
-    "content-length",
-    "content-type",
-    "content-range",
-    "accept-ranges",
-    "last-modified",
-  ];
-  for (const name of passthrough) {
-    const value = upstream.headers.get(name);
-    if (value) headers.set(name, value);
+  if (typeof format.content_length === "number") {
+    headers.set("content-length", String(format.content_length));
   }
-
-  if (!headers.has("content-type")) {
-    headers.set("content-type", format.mimeType?.split(";")[0] ?? "audio/mp4");
-  }
-
+  // Strip the "; codecs=..." parameter — only the bare content type
+  // matters to the browser when receiving raw bytes.
+  const baseMime = (format.mime_type ?? "audio/mp4").split(";")[0].trim();
+  headers.set("content-type", baseMime);
   headers.set("cache-control", "private, max-age=0, no-store");
-  // Hint to the browser that this is downloadable raw audio (not an MP3 yet)
-  headers.set("x-yt-mp3-container", format.container ?? "");
+  // Helpful for debugging in DevTools — surface which format we picked.
   headers.set("x-yt-mp3-itag", String(format.itag));
+  if (format.mime_type) {
+    headers.set("x-yt-mp3-mime", format.mime_type);
+  }
 
-  return new Response(upstream.body, {
-    status: upstream.status,
+  // Cancel the upstream stream if the client disconnects mid-download.
+  // SvelteKit/Node won't do this automatically — without it, an
+  // aborted browser request keeps the googlevideo connection open
+  // until completion, which wastes bandwidth and a serverless invocation.
+  const abort = new AbortController();
+  request.signal.addEventListener("abort", () => {
+    abort.abort();
+    audioStream.cancel().catch(() => {
+      /* already done — ignore */
+    });
+  });
+
+  return new Response(audioStream, {
+    status: 200,
     headers,
   });
 }
 
-// POST is the canonical entry point — it lets the client send cookies in
-// the body (avoiding URL-length and header-size limits) and keeps auth data
-// out of server access logs.
+// POST is the canonical entry point.
 export const POST: RequestHandler = ({ request, url }) =>
   handleStream(request, url);
 
-// GET is kept for convenience during local dev / curl testing. It can't be
-// used with cookies (we don't accept them in query params for security
-// reasons), so it's only useful for unauthenticated requests.
+// GET is kept for convenience during local dev / curl testing.
 export const GET: RequestHandler = ({ request, url }) =>
   handleStream(request, url);
