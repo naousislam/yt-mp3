@@ -38,6 +38,12 @@ Thumbs.db
 stream-out.bin
 server.log
 
+# yt-dlp binary — downloaded fresh by scripts/install-yt-dlp.mjs on
+# every `bun install` / `npm install`. Don't commit it: 18 MB+ per
+# platform, and we want each user to get the latest stable build
+# rather than whatever was current when this repo was last pushed.
+/bin/
+
 # Debug player-script dumps that ytdl-core writes to the project root
 # whenever it fails to parse YouTube's signature cipher. Harmless but
 # noisy in `git status`.

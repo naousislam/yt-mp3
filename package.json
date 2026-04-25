@@ -9,7 +9,9 @@
     "start": "node ./build/index.js",
     "preview": "vite preview",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
-    "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch"
+    "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
+    "postinstall": "node ./scripts/install-yt-dlp.mjs",
+    "yt-dlp:update": "node ./scripts/install-yt-dlp.mjs --force"
   },
   "devDependencies": {
     "@sveltejs/adapter-node": "^5.5.4",
@@ -24,7 +26,6 @@
     "vite": "^6.0.5"
   },
   "dependencies": {
-    "@breezystack/lamejs": "^1.2.7",
-    "youtubei.js": "^17.0.1"
+    "@breezystack/lamejs": "^1.2.7"
   }
 }
