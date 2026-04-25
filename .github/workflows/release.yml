@@ -95,6 +95,20 @@ jobs:
       - name: Check out the source
         uses: actions/checkout@v4
 
+      # pkg's SEA (Single Executable Applications) mode requires
+      # Node >= 22 on the *host* that runs pkg itself, not just on
+      # the target. macos-latest and windows-latest already ship
+      # Node 22+, but ubuntu-latest's preinstalled Node is still on
+      # v20.x — without this step the Linux job fails with:
+      #   Error: SEA support requires at least node v22.0.0,
+      #   actual node version is v20.20.2
+      # We install Node 22 on every runner for consistency and to
+      # immunize the workflow against future image-default drift.
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
       # Bun handles installs and the launcher / dev scripts. The
       # actual server runtime inside the binary is Node — pkg
       # bundles its own Node, we don't need it on the runner.
