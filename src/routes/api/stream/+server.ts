@@ -82,6 +82,14 @@ export const GET: RequestHandler = async ({ url, request }) => {
   try {
     info = await ytdl.getInfo(`https://www.youtube.com/watch?v=${videoId}`, {
       requestOptions: { headers: YT_HEADERS },
+      // Try non-WEB clients first. YouTube applies its strictest anti-bot
+      // checks to the WEB player; the TV / iOS / Android clients are designed
+      // for third-party device contexts and tend to keep working from cloud
+      // IP ranges (Vercel, AWS, etc.) where WEB is blocked. ytdl-core walks
+      // this list in order and uses the first client that returns a usable
+      // response, so we keep WEB at the end as a final fallback. This list
+      // must match the one in /api/info so the format selection stays in sync.
+      playerClients: ["TV", "IOS", "ANDROID", "WEB_EMBEDDED", "WEB"],
     });
   } catch (e) {
     const message = e instanceof Error ? e.message : "Unknown error";
