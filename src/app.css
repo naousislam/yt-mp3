@@ -1,0 +1,75 @@
+@import 'tailwindcss';
+
+@theme {
+	--font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+	--color-brand-50: #eef9ff;
+	--color-brand-100: #d9f0ff;
+	--color-brand-200: #bbe5ff;
+	--color-brand-300: #8dd5ff;
+	--color-brand-400: #57bcff;
+	--color-brand-500: #2f9dff;
+	--color-brand-600: #1a7ef5;
+	--color-brand-700: #1665db;
+	--color-brand-800: #1854b0;
+	--color-brand-900: #19498b;
+}
+
+html,
+body {
+	height: 100%;
+}
+
+body {
+	font-family: var(--font-sans);
+	background:
+		radial-gradient(ellipse 80% 50% at 50% -20%, rgba(47, 157, 255, 0.18), transparent 60%),
+		radial-gradient(ellipse 60% 50% at 100% 0%, rgba(168, 85, 247, 0.12), transparent 60%),
+		#09090b;
+	min-height: 100vh;
+	min-height: 100dvh;
+}
+
+@layer utilities {
+	.glass {
+		background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.02));
+		backdrop-filter: blur(14px);
+		-webkit-backdrop-filter: blur(14px);
+		border: 1px solid rgba(255, 255, 255, 0.08);
+	}
+
+	.text-balance {
+		text-wrap: balance;
+	}
+
+	.shimmer {
+		background: linear-gradient(
+			90deg,
+			rgba(255, 255, 255, 0) 0%,
+			rgba(255, 255, 255, 0.08) 50%,
+			rgba(255, 255, 255, 0) 100%
+		);
+		background-size: 200% 100%;
+		animation: shimmer 1.6s linear infinite;
+	}
+
+	@keyframes shimmer {
+		0% {
+			background-position: 200% 0;
+		}
+		100% {
+			background-position: -200% 0;
+		}
+	}
+}
+
+/* Inputs reset for mobile */
+input[type='text'],
+input[type='url'] {
+	-webkit-appearance: none;
+	appearance: none;
+}
+
+::selection {
+	background: rgba(47, 157, 255, 0.3);
+	color: #fff;
+}
