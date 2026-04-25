@@ -1,5 +1,6 @@
 import { error } from "@sveltejs/kit";
 import { extractVideoId, MAX_DURATION_SECONDS } from "$lib/youtube";
+import { toYtdlCookies, toCookieHeader, type Cookie } from "$lib/cookies";
 import type { RequestHandler } from "./$types";
 
 export const config = {
@@ -50,6 +51,53 @@ const YT_HEADERS = {
 };
 
 /**
+ * Read the request body and pull out the `url` and optional `cookies`.
+ * Accepts JSON for POST (the canonical path) or query params for GET so
+ * curl / address-bar testing still works during local development.
+ *
+ * Cookies are deliberately not accepted via query string — they should
+ * never appear in URLs (server access logs, browser history, Referer
+ * headers, etc.).
+ */
+async function parseRequest(
+  request: Request,
+  url: URL,
+): Promise<{
+  input: string | null;
+  cookies: Cookie[];
+}> {
+  let input: string | null = null;
+  let cookies: Cookie[] = [];
+
+  if (request.method === "POST") {
+    try {
+      const body = (await request.json()) as {
+        url?: unknown;
+        cookies?: unknown;
+      };
+      if (typeof body?.url === "string") input = body.url;
+      if (Array.isArray(body?.cookies)) {
+        cookies = body.cookies.filter(
+          (c): c is Cookie =>
+            !!c &&
+            typeof c === "object" &&
+            typeof (c as Cookie).name === "string" &&
+            typeof (c as Cookie).value === "string",
+        );
+      }
+    } catch {
+      // Empty / non-JSON body is fine — fall through to query params.
+    }
+  }
+
+  if (!input) {
+    input = url.searchParams.get("url") ?? url.searchParams.get("v");
+  }
+
+  return { input, cookies };
+}
+
+/**
  * Proxies the raw (compressed) audio bytes from googlevideo to the browser.
  *
  * This server hop is unavoidable: googlevideo URLs are signed, short-lived,
@@ -59,10 +107,11 @@ const YT_HEADERS = {
  *
  * The actual MP3 transcoding happens entirely on the client.
  */
-export const GET: RequestHandler = async ({ url, request }) => {
-  const input = url.searchParams.get("url") ?? url.searchParams.get("v");
+async function handleStream(request: Request, url: URL): Promise<Response> {
+  const { input, cookies } = await parseRequest(request, url);
+
   if (!input) {
-    error(400, "Missing `url` query parameter");
+    error(400, "Missing `url` field");
   }
 
   const videoId = extractVideoId(input);
@@ -78,10 +127,17 @@ export const GET: RequestHandler = async ({ url, request }) => {
   // runtime configured above.
   const ytdl = (await import("@distube/ytdl-core")).default;
 
+  // If the user supplied cookies, build a ytdl agent backed by them so the
+  // innertube call carries valid auth. The googlevideo download below also
+  // gets the cookies attached as a `Cookie:` header.
+  const agent =
+    cookies.length > 0 ? ytdl.createAgent(toYtdlCookies(cookies)) : undefined;
+
   let info;
   try {
     info = await ytdl.getInfo(`https://www.youtube.com/watch?v=${videoId}`, {
       requestOptions: { headers: YT_HEADERS },
+      agent,
       // Try non-WEB clients first. YouTube applies its strictest anti-bot
       // checks to the WEB player; the TV / iOS / Android clients are designed
       // for third-party device contexts and tend to keep working from cloud
@@ -93,6 +149,14 @@ export const GET: RequestHandler = async ({ url, request }) => {
     });
   } catch (e) {
     const message = e instanceof Error ? e.message : "Unknown error";
+    if (/sign in|confirm/i.test(message)) {
+      error(
+        401,
+        cookies.length > 0
+          ? "Your YouTube cookies were rejected. They may have expired — please reconnect."
+          : "YouTube is blocking this server's IP. Connect your YouTube account to continue.",
+      );
+    }
     console.error("[api/stream] ytdl.getInfo failed:", message);
     error(502, `Failed to resolve video: ${message}`);
   }
@@ -120,6 +184,13 @@ export const GET: RequestHandler = async ({ url, request }) => {
   const range = request.headers.get("range");
   const upstreamHeaders: Record<string, string> = { ...YT_HEADERS };
   if (range) upstreamHeaders.range = range;
+  if (cookies.length > 0) {
+    // googlevideo doesn't strictly require cookies to serve already-signed
+    // URLs, but attaching them keeps the request consistent with the
+    // innertube call above and avoids edge cases where YouTube rotates the
+    // signed URL based on session.
+    upstreamHeaders.cookie = toCookieHeader(cookies);
+  }
 
   let upstream: Response;
   try {
@@ -172,4 +243,16 @@ export const GET: RequestHandler = async ({ url, request }) => {
     status: upstream.status,
     headers,
   });
-};
+}
+
+// POST is the canonical entry point — it lets the client send cookies in
+// the body (avoiding URL-length and header-size limits) and keeps auth data
+// out of server access logs.
+export const POST: RequestHandler = ({ request, url }) =>
+  handleStream(request, url);
+
+// GET is kept for convenience during local dev / curl testing. It can't be
+// used with cookies (we don't accept them in query params for security
+// reasons), so it's only useful for unauthenticated requests.
+export const GET: RequestHandler = ({ request, url }) =>
+  handleStream(request, url);

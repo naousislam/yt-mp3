@@ -47,6 +47,80 @@ the native `Web Audio API`.
 
 ---
 
+## "Connect YouTube" — per-user cookie auth
+
+YouTube blocks unauthenticated requests from datacenter IP ranges (Vercel,
+AWS, etc.) with a **"sign in to confirm you're not a bot"** error. Almost
+every `ytdl-core`-on-Vercel deployment hits this.
+
+This app's workaround is **per-user cookie auth**: each user pastes their own
+YouTube session cookies once, and the server forwards those cookies to
+`ytdl-core` on every request. With a real session attached, YouTube treats
+the request as a normal browser hit and serves the audio.
+
+### How it works end-to-end
+
+1. User clicks **Connect YouTube** in the header
+2. They follow the in-app instructions to export cookies from a logged-in
+   `youtube.com` tab using a browser extension
+3. They paste the cookie blob into the textarea — we accept Netscape
+   `cookies.txt`, JSON arrays, or `name=value; name=value` header strings
+4. Cookies are parsed client-side, filtered down to the ~20 names YouTube
+   actually uses for auth (everything else is dropped), and saved to
+   `localStorage`
+5. On every `/api/info` and `/api/stream` request, the cookies are sent in
+   the **POST request body** (not the URL — never leak auth into logs)
+6. The server builds a `ytdl.createAgent(cookies)` per request and uses it
+   for both the metadata lookup and the googlevideo download
+
+### Trust model — be honest with users
+
+Cookies travel through our server to reach YouTube, so the operator of the
+deployment can technically see them in transit. The app is engineered to
+minimize this:
+
+- **Nothing is persisted server-side.** Cookies are read from the request
+  body, attached to one outbound `ytdl-core` call, and forgotten when the
+  request ends.
+- **Storage is client-only.** Cookies live in the user's `localStorage`,
+  never in a database.
+- **Filtered to auth cookies.** We drop everything that isn't a Google /
+  YouTube session cookie before sending — no analytics, no ad cookies.
+- **HTTPS-only in production.** Vercel terminates TLS for us.
+
+That said, **session cookies grant full account access**. The app
+deliberately tells users to sign in with a **throwaway Google account**, not
+their main one. We surface that warning in the connect dialog every time.
+
+### Files involved
+
+| File                              | What it does                                                  |
+| --------------------------------- | ------------------------------------------------------------- |
+| `src/lib/cookies.ts`              | Parses 3 cookie formats, filters auth-only, localStorage I/O |
+| `src/routes/api/info/+server.ts`  | Accepts `POST { url, cookies }`, builds `ytdl.createAgent()` |
+| `src/routes/api/stream/+server.ts`| Same auth flow; also passes cookies to googlevideo            |
+| `src/routes/+page.svelte`         | "Connect YouTube" dialog + auto-prompt on `401` errors        |
+
+### Status codes you'll see
+
+| Code | Meaning                                                                  |
+| ---- | ------------------------------------------------------------------------ |
+| 401  | YouTube wants auth. Client auto-opens the connect dialog.                |
+| 403  | Age-restricted video. Cookies don't help; this is enforced server-side.  |
+| 404  | Video unavailable / private / region-blocked.                            |
+| 413  | Video exceeds the 15-minute limit.                                       |
+| 502  | YouTube returned an error or `ytdl-core` failed to parse a response.     |
+
+### Cookie expiry
+
+YouTube's session cookies typically last weeks to months. When they expire,
+the server returns `401` with the message **"Your YouTube cookies were
+rejected. They may have expired — please reconnect."** and the connect
+dialog opens automatically. The user re-exports cookies and pastes again —
+no code changes needed.
+
+---
+
 ## Stack
 
 | Layer        | Choice                                                      |

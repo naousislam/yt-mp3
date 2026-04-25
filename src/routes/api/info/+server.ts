@@ -4,6 +4,7 @@ import {
   MAX_DURATION_SECONDS,
   sanitizeFilename,
 } from "$lib/youtube";
+import { toYtdlCookies, type Cookie } from "$lib/cookies";
 import type { InfoResponse } from "$lib/api-types";
 import type { RequestHandler } from "./$types";
 
@@ -51,10 +52,54 @@ function pickBestAudioFormat<
   );
 }
 
-export const GET: RequestHandler = async ({ url }) => {
-  const input = url.searchParams.get("url") ?? url.searchParams.get("v");
+/**
+ * Read the request body and pull out the `url` and optional `cookies`.
+ * We accept either JSON (preferred) or a query parameter for `url` so
+ * curl / browser address-bar testing still works during development.
+ */
+async function parseRequest(
+  request: Request,
+  url: URL,
+): Promise<{
+  input: string | null;
+  cookies: Cookie[];
+}> {
+  let input: string | null = null;
+  let cookies: Cookie[] = [];
+
+  if (request.method === "POST") {
+    try {
+      const body = (await request.json()) as {
+        url?: unknown;
+        cookies?: unknown;
+      };
+      if (typeof body?.url === "string") input = body.url;
+      if (Array.isArray(body?.cookies)) {
+        cookies = body.cookies.filter(
+          (c): c is Cookie =>
+            !!c &&
+            typeof c === "object" &&
+            typeof (c as Cookie).name === "string" &&
+            typeof (c as Cookie).value === "string",
+        );
+      }
+    } catch {
+      // Empty / non-JSON body is fine — fall through to query params.
+    }
+  }
+
   if (!input) {
-    error(400, "Missing `url` query parameter");
+    input = url.searchParams.get("url") ?? url.searchParams.get("v");
+  }
+
+  return { input, cookies };
+}
+
+async function handleInfo(request: Request, url: URL): Promise<Response> {
+  const { input, cookies } = await parseRequest(request, url);
+
+  if (!input) {
+    error(400, "Missing `url` field");
   }
 
   const videoId = extractVideoId(input);
@@ -70,10 +115,18 @@ export const GET: RequestHandler = async ({ url }) => {
   // runtime configured above.
   const ytdl = (await import("@distube/ytdl-core")).default;
 
+  // If the user supplied cookies, build a ytdl agent backed by them so the
+  // outbound googlevideo / innertube requests carry valid auth. Otherwise
+  // fall through to the unauthenticated path, which usually fails on
+  // Vercel IPs but is fine for local dev.
+  const agent =
+    cookies.length > 0 ? ytdl.createAgent(toYtdlCookies(cookies)) : undefined;
+
   let info;
   try {
     info = await ytdl.getInfo(`https://www.youtube.com/watch?v=${videoId}`, {
       requestOptions: { headers: YT_HEADERS },
+      agent,
       // Try non-WEB clients first. YouTube applies its strictest anti-bot
       // checks to the WEB player; the TV / iOS / Android clients are designed
       // for third-party device contexts and tend to keep working from cloud
@@ -92,9 +145,13 @@ export const GET: RequestHandler = async ({ url }) => {
       error(404, "This video is unavailable, private, or region-blocked");
     }
     if (/sign in|confirm/i.test(message)) {
+      // Surface a custom code so the client can prompt the user to connect
+      // their YouTube account, instead of just showing a generic error.
       error(
-        403,
-        "YouTube is requiring sign-in for this video. Try a different video.",
+        401,
+        cookies.length > 0
+          ? "Your YouTube cookies were rejected. They may have expired — please reconnect."
+          : "YouTube is blocking this server's IP. Connect your YouTube account to continue.",
       );
     }
     console.error("[api/info] ytdl.getInfo failed:", message);
@@ -158,4 +215,16 @@ export const GET: RequestHandler = async ({ url }) => {
       "cache-control": "private, max-age=0, no-store",
     },
   });
-};
+}
+
+// POST is the canonical entry point — it lets the client send cookies in
+// the body (avoiding URL-length and header-size limits) and keeps auth data
+// out of server access logs.
+export const POST: RequestHandler = ({ request, url }) =>
+  handleInfo(request, url);
+
+// GET is kept for convenience during local dev / curl testing. It can't be
+// used with cookies (we don't accept them in query params for security
+// reasons), so it's only useful for unauthenticated requests.
+export const GET: RequestHandler = ({ request, url }) =>
+  handleInfo(request, url);

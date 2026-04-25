@@ -9,8 +9,15 @@ export type EncodeProgress = {
 };
 
 export type EncodeOptions = {
-  /** Source URL to fetch the compressed audio bytes from. */
-  streamUrl: string;
+  /** YouTube URL or 11-character video ID to convert. */
+  input: string;
+  /**
+   * Optional cookies to forward to the server so YouTube treats the
+   * outbound request as authenticated. Required in production whenever
+   * YouTube is blocking the server's IP. Each entry is forwarded verbatim
+   * to /api/stream in the request body.
+   */
+  cookies?: Array<{ name: string; value: string; domain?: string }>;
   /** Optional content length hint (in bytes) for accurate download progress. */
   contentLength?: number | null;
   /** Target MP3 bitrate in kbps. Defaults to 192. */
@@ -96,17 +103,31 @@ function ensureNotAborted(signal?: AbortSignal): void {
 }
 
 /**
- * Stream the bytes from `url` into a single ArrayBuffer while reporting
- * download progress. We can't rely on the native `Response.body` progress
- * because we want a single buffer to feed into `decodeAudioData`.
+ * POST to /api/stream and stream the audio bytes back into a single
+ * ArrayBuffer while reporting download progress.
+ *
+ * We POST (rather than GET) so the user's YouTube cookies travel in the
+ * request body — they don't belong in URLs (which leak through server
+ * access logs, browser history, and Referer headers). The server handler
+ * accepts the same JSON shape as /api/info, plus an optional `cookies`
+ * array.
+ *
+ * We can't lean on the native `Response.body` progress because we need a
+ * single contiguous buffer to feed into `decodeAudioData`.
  */
 async function downloadWithProgress(
-  url: string,
+  input: string,
+  cookies: EncodeOptions["cookies"],
   contentLength: number | null,
   onProgress: ((p: EncodeProgress) => void) | undefined,
   signal: AbortSignal | undefined,
 ): Promise<ArrayBuffer> {
-  const response = await fetch(url, { signal });
+  const response = await fetch("/api/stream", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ url: input, cookies: cookies ?? [] }),
+    signal,
+  });
 
   if (!response.ok) {
     // Try to surface a useful error message from the JSON error body
@@ -316,13 +337,14 @@ async function encodeMp3(
 export async function downloadAndEncodeMp3(
   options: EncodeOptions,
 ): Promise<EncodeResult> {
-  const { streamUrl, contentLength, onProgress, signal } = options;
+  const { input, cookies, contentLength, onProgress, signal } = options;
   const bitrate = options.bitrate ?? DEFAULT_BITRATE;
 
   ensureNotAborted(signal);
 
   const bytes = await downloadWithProgress(
-    streamUrl,
+    input,
+    cookies,
     contentLength ?? null,
     onProgress,
     signal,
