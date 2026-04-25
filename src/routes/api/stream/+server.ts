@@ -3,11 +3,6 @@ import { extractVideoId, MAX_DURATION_SECONDS } from "$lib/youtube";
 import { toYtdlCookies, toCookieHeader, type Cookie } from "$lib/cookies";
 import type { RequestHandler } from "./$types";
 
-export const config = {
-  runtime: "nodejs22.x",
-  maxDuration: 60,
-};
-
 /**
  * Pick the best audio-only format. Mirrors the logic in /api/info so that
  * the format streamed here matches the metadata advertised to the client.

@@ -8,11 +8,6 @@ import { toYtdlCookies, type Cookie } from "$lib/cookies";
 import type { InfoResponse } from "$lib/api-types";
 import type { RequestHandler } from "./$types";
 
-export const config = {
-  runtime: "nodejs22.x",
-  maxDuration: 30,
-};
-
 const YT_HEADERS = {
   // A modern desktop UA helps avoid age-gate / consent walls.
   "User-Agent":

@@ -2,14 +2,6 @@
 	import { downloadAndEncodeMp3, triggerDownload, type EncodeProgress } from '$lib/mp3';
 	import { formatBytes, formatDuration } from '$lib/youtube';
 	import type { InfoResponse } from '$lib/api-types';
-	import {
-		parseCookies,
-		saveStoredCookies,
-		loadStoredCookies,
-		clearStoredCookies,
-		looksLikeAuthenticated,
-		type Cookie
-	} from '$lib/cookies';
 
 	type Phase = 'idle' | 'fetching-info' | 'ready' | 'converting' | 'done' | 'error';
 
@@ -29,17 +21,6 @@
 
 	let bitrate = $state<128 | 160 | 192 | 256 | 320>(192);
 
-	// Cookie / "Connect YouTube" state. Persisted to localStorage so the user
-	// only has to paste cookies once per browser, and surfaced through a small
-	// status pill in the header.
-	let cookies = $state<Cookie[]>([]);
-	let cookiesSavedAt = $state<number | null>(null);
-	let connectOpen = $state(false);
-	let connectInput = $state('');
-	let connectError = $state<string | null>(null);
-
-	const isConnected = $derived(cookies.length > 0 && looksLikeAuthenticated(cookies));
-
 	let abortController: AbortController | null = null;
 
 	const stageLabels: Record<EncodeProgress['stage'], string> = {
@@ -54,17 +35,6 @@
 	const progressPercent = $derived(
 		progress?.progress != null ? Math.round(progress.progress * 100) : null
 	);
-
-	// Hydrate cookies from localStorage on mount. We do this in an effect
-	// rather than at the top level because $state values aren't allowed to
-	// touch `localStorage` during SSR.
-	$effect(() => {
-		const stored = loadStoredCookies();
-		if (stored) {
-			cookies = stored.cookies;
-			cookiesSavedAt = stored.savedAt;
-		}
-	});
 
 	function reset() {
 		abortController?.abort();
@@ -89,42 +59,6 @@
 			});
 	}
 
-	function openConnect() {
-		connectInput = '';
-		connectError = null;
-		connectOpen = true;
-	}
-
-	function closeConnect() {
-		connectOpen = false;
-		connectInput = '';
-		connectError = null;
-	}
-
-	function saveCookies() {
-		try {
-			const parsed = parseCookies(connectInput);
-			cookies = parsed;
-			cookiesSavedAt = Date.now();
-			saveStoredCookies(parsed);
-			closeConnect();
-			// If we were sitting on an auth error, clear it so the user can
-			// retry without an extra click.
-			if (phase === 'error' && errorMessage && /youtube|sign|cookies/i.test(errorMessage)) {
-				errorMessage = null;
-				phase = 'idle';
-			}
-		} catch (err) {
-			connectError = err instanceof Error ? err.message : 'Could not parse cookies';
-		}
-	}
-
-	function disconnect() {
-		cookies = [];
-		cookiesSavedAt = null;
-		clearStoredCookies();
-	}
-
 	async function fetchInfo(event?: Event) {
 		event?.preventDefault();
 		if (!urlInput.trim() || isBusy) return;
@@ -137,26 +71,19 @@
 		progress = null;
 
 		try {
+			// POST `/api/info` with no cookies. The server still accepts an
+			// optional `cookies` array (see `src/lib/cookies.ts` and the API
+			// handlers) — we just don't surface that path in the UI any more.
+			// Running locally on a residential IP, YouTube treats requests
+			// as legitimate and the cookie workaround is unnecessary.
 			const response = await fetch('/api/info', {
 				method: 'POST',
 				headers: { 'content-type': 'application/json' },
-				body: JSON.stringify({
-					url: urlInput.trim(),
-					cookies
-				})
+				body: JSON.stringify({ url: urlInput.trim() })
 			});
 			if (!response.ok) {
 				const data = await response.json().catch(() => ({}));
-				const message = data?.message ?? `Request failed (HTTP ${response.status})`;
-				// 401 means YouTube is asking for auth — auto-open the connect
-				// dialog to save the user a click.
-				if (response.status === 401) {
-					phase = 'error';
-					errorMessage = message;
-					openConnect();
-					return;
-				}
-				throw new Error(message);
+				throw new Error(data?.message ?? `Request failed (HTTP ${response.status})`);
 			}
 			info = (await response.json()) as InfoResponse;
 			phase = 'ready';
@@ -184,7 +111,6 @@
 		try {
 			const result = await downloadAndEncodeMp3({
 				input: info.id,
-				cookies,
 				contentLength: info.format.contentLength,
 				bitrate,
 				signal: abortController.signal,
@@ -210,14 +136,8 @@
 				progress = null;
 				return;
 			}
-			const message = err instanceof Error ? err.message : 'Conversion failed';
-			errorMessage = message;
+			errorMessage = err instanceof Error ? err.message : 'Conversion failed';
 			phase = 'error';
-			// If the stream endpoint rejected us with a sign-in error, prompt
-			// the user to (re)connect their YouTube account.
-			if (/sign in|cookies|youtube is blocking/i.test(message)) {
-				openConnect();
-			}
 		} finally {
 			abortController = null;
 		}
@@ -242,60 +162,20 @@
 </svelte:head>
 
 <main class="mx-auto flex min-h-dvh w-full max-w-3xl flex-col px-4 py-8 sm:px-6 sm:py-12">
-	<header class="mb-8 flex items-center justify-between gap-3 sm:mb-12">
+	<header class="mb-8 sm:mb-12">
 		<div class="flex items-center gap-3">
 			<div
 				class="grid h-10 w-10 place-items-center rounded-xl bg-gradient-to-br from-brand-500 to-purple-500 shadow-lg shadow-brand-500/20"
 			>
 				<svg viewBox="0 0 24 24" class="h-6 w-6 text-white" fill="currentColor">
-					<path
-						d="M9 7v8.5a2.5 2.5 0 1 1-1.5-2.29V8h7V6H9z"
-						transform="translate(-1 1)"
-					/>
+					<path d="M9 7v8.5a2.5 2.5 0 1 1-1.5-2.29V8h7V6H9z" transform="translate(-1 1)" />
 				</svg>
 			</div>
-			<div class="min-w-0">
+			<div>
 				<h1 class="text-lg font-semibold tracking-tight">YT → MP3</h1>
-				<p class="truncate text-xs text-zinc-400">
-					High-quality audio, encoded in your browser
-				</p>
+				<p class="text-xs text-zinc-400">High-quality audio, encoded in your browser</p>
 			</div>
 		</div>
-
-		{#if isConnected}
-			<button
-				type="button"
-				onclick={openConnect}
-				class="flex flex-shrink-0 items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-xs font-medium text-emerald-200 transition hover:bg-emerald-500/15"
-				aria-label="YouTube connected — click to manage"
-			>
-				<span class="h-1.5 w-1.5 rounded-full bg-emerald-400"></span>
-				<span class="hidden sm:inline">Connected</span>
-				<span class="sm:hidden">YT</span>
-			</button>
-		{:else}
-			<button
-				type="button"
-				onclick={openConnect}
-				class="flex flex-shrink-0 items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.03] px-2.5 py-1 text-xs font-medium text-zinc-300 transition hover:bg-white/[0.06]"
-			>
-				<svg
-					viewBox="0 0 24 24"
-					class="h-3.5 w-3.5"
-					fill="none"
-					stroke="currentColor"
-					stroke-width="2"
-					stroke-linecap="round"
-					stroke-linejoin="round"
-					aria-hidden="true"
-				>
-					<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
-					<path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
-				</svg>
-				<span class="hidden sm:inline">Connect YouTube</span>
-				<span class="sm:hidden">Connect</span>
-			</button>
-		{/if}
 	</header>
 
 	<section class="mb-6">
@@ -632,9 +512,7 @@
 
 	<section class="mt-10 grid gap-3 sm:grid-cols-3">
 		<div class="glass rounded-xl p-4">
-			<div
-				class="grid h-8 w-8 place-items-center rounded-lg bg-brand-500/15 text-brand-300"
-			>
+			<div class="grid h-8 w-8 place-items-center rounded-lg bg-brand-500/15 text-brand-300">
 				<svg
 					viewBox="0 0 24 24"
 					class="h-4 w-4"
@@ -655,9 +533,7 @@
 			</p>
 		</div>
 		<div class="glass rounded-xl p-4">
-			<div
-				class="grid h-8 w-8 place-items-center rounded-lg bg-purple-500/15 text-purple-300"
-			>
+			<div class="grid h-8 w-8 place-items-center rounded-lg bg-purple-500/15 text-purple-300">
 				<svg
 					viewBox="0 0 24 24"
 					class="h-4 w-4"
@@ -677,9 +553,7 @@
 			</p>
 		</div>
 		<div class="glass rounded-xl p-4">
-			<div
-				class="grid h-8 w-8 place-items-center rounded-lg bg-emerald-500/15 text-emerald-300"
-			>
+			<div class="grid h-8 w-8 place-items-center rounded-lg bg-emerald-500/15 text-emerald-300">
 				<svg
 					viewBox="0 0 24 24"
 					class="h-4 w-4"
@@ -694,9 +568,9 @@
 					<path d="M2 9h20" />
 				</svg>
 			</div>
-			<h3 class="mt-3 text-sm font-semibold text-zinc-100">Works on mobile</h3>
+			<h3 class="mt-3 text-sm font-semibold text-zinc-100">Runs locally</h3>
 			<p class="mt-1 text-xs text-zinc-400">
-				Responsive UI tuned for phones and tablets. iOS Safari and Android Chrome supported.
+				Self-hosted on your own machine. Your residential IP keeps YouTube happy.
 			</p>
 		</div>
 	</section>
@@ -713,234 +587,3 @@
 		</p>
 	</footer>
 </main>
-
-{#if connectOpen}
-	<!-- Backdrop: click to close. We use a button so it's keyboard-accessible -->
-	<button
-		type="button"
-		aria-label="Close dialog"
-		onclick={closeConnect}
-		class="fixed inset-0 z-40 bg-black/70 backdrop-blur-sm"
-	></button>
-
-	<div
-		role="dialog"
-		aria-modal="true"
-		aria-labelledby="connect-title"
-		class="fixed inset-x-0 bottom-0 z-50 flex max-h-[92dvh] flex-col overflow-hidden rounded-t-2xl border-t border-white/10 bg-zinc-950 shadow-2xl sm:inset-0 sm:m-auto sm:h-fit sm:max-h-[88dvh] sm:max-w-lg sm:rounded-2xl sm:border"
-	>
-		<div class="flex items-start justify-between gap-3 border-b border-white/10 p-5">
-			<div class="min-w-0">
-				<h2 id="connect-title" class="text-base font-semibold text-zinc-50">
-					Connect YouTube
-				</h2>
-				<p class="mt-1 text-xs text-zinc-400">
-					Paste your YouTube cookies so the server can fetch videos as you.
-				</p>
-			</div>
-			<button
-				type="button"
-				onclick={closeConnect}
-				aria-label="Close"
-				class="-m-2 rounded-md p-2 text-zinc-500 transition hover:bg-white/5 hover:text-zinc-200"
-			>
-				<svg
-					viewBox="0 0 24 24"
-					class="h-5 w-5"
-					fill="none"
-					stroke="currentColor"
-					stroke-width="2"
-					stroke-linecap="round"
-					stroke-linejoin="round"
-					aria-hidden="true"
-				>
-					<line x1="18" y1="6" x2="6" y2="18" />
-					<line x1="6" y1="6" x2="18" y2="18" />
-				</svg>
-			</button>
-		</div>
-
-		<div class="flex-1 space-y-4 overflow-y-auto p-5">
-			<div
-				class="flex items-start gap-3 rounded-xl border border-amber-500/20 bg-amber-500/[0.06] p-3 text-xs text-amber-100"
-			>
-				<svg
-					viewBox="0 0 24 24"
-					class="mt-0.5 h-4 w-4 flex-shrink-0 text-amber-400"
-					fill="none"
-					stroke="currentColor"
-					stroke-width="2"
-					stroke-linecap="round"
-					stroke-linejoin="round"
-					aria-hidden="true"
-				>
-					<path d="M12 9v4" />
-					<path d="M12 17h.01" />
-					<path
-						d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"
-					/>
-				</svg>
-				<div>
-					<p class="font-medium text-amber-50">Use a throwaway account</p>
-					<p class="mt-0.5 text-amber-100/80">
-						Cookies grant full session access. Sign in to YouTube with a secondary Google
-						account, export cookies from there, and never share those cookies with anyone.
-					</p>
-				</div>
-			</div>
-
-			<details class="group rounded-xl border border-white/10 bg-white/[0.02]">
-				<summary
-					class="flex cursor-pointer list-none items-center justify-between gap-2 px-4 py-3 text-sm font-medium text-zinc-200 transition hover:bg-white/[0.03]"
-				>
-					<span>How to export cookies</span>
-					<svg
-						viewBox="0 0 24 24"
-						class="h-4 w-4 text-zinc-500 transition-transform group-open:rotate-180"
-						fill="none"
-						stroke="currentColor"
-						stroke-width="2"
-						stroke-linecap="round"
-						stroke-linejoin="round"
-						aria-hidden="true"
-					>
-						<polyline points="6 9 12 15 18 9" />
-					</svg>
-				</summary>
-				<ol
-					class="space-y-2 border-t border-white/10 px-4 py-3 text-xs leading-relaxed text-zinc-400"
-				>
-					<li>
-						<span class="font-medium text-zinc-300">1.</span> Install a cookie-export
-						extension. Recommended:
-						<a
-							class="text-brand-300 hover:underline"
-							href="https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc"
-							target="_blank"
-							rel="noopener noreferrer">Get cookies.txt LOCALLY</a
-						>
-						(Chrome) or
-						<a
-							class="text-brand-300 hover:underline"
-							href="https://addons.mozilla.org/en-US/firefox/addon/cookies-txt/"
-							target="_blank"
-							rel="noopener noreferrer">cookies.txt</a
-						>
-						(Firefox).
-					</li>
-					<li>
-						<span class="font-medium text-zinc-300">2.</span> Open
-						<a
-							class="text-brand-300 hover:underline"
-							href="https://www.youtube.com"
-							target="_blank"
-							rel="noopener noreferrer">youtube.com</a
-						>
-						in a new tab and log in with your throwaway account.
-					</li>
-					<li>
-						<span class="font-medium text-zinc-300">3.</span> Click the extension icon and
-						export cookies for the current site.
-					</li>
-					<li>
-						<span class="font-medium text-zinc-300">4.</span> Paste the contents below.
-						We accept Netscape (cookies.txt), JSON, or
-						<code class="rounded bg-white/5 px-1 py-0.5 text-zinc-300"
-							>name=value; ...</code
-						>
-						formats.
-					</li>
-				</ol>
-			</details>
-
-			<div>
-				<label
-					for="connect-cookies"
-					class="block text-xs font-medium text-zinc-400"
-				>
-					Cookie data
-				</label>
-				<textarea
-					id="connect-cookies"
-					bind:value={connectInput}
-					rows="6"
-					spellcheck="false"
-					autocapitalize="off"
-					placeholder={'# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t...\tSID\t...'}
-					class="mt-2 w-full rounded-xl border border-white/10 bg-black/40 p-3 font-mono text-xs text-zinc-100 placeholder:text-zinc-600 outline-none transition focus:border-brand-500/60 focus:ring-2 focus:ring-brand-500/30"
-				></textarea>
-			</div>
-
-			{#if connectError}
-				<p
-					role="alert"
-					class="rounded-lg border border-red-500/30 bg-red-500/[0.08] px-3 py-2 text-xs text-red-200"
-				>
-					{connectError}
-				</p>
-			{/if}
-
-			{#if isConnected}
-				<div
-					class="flex items-start gap-3 rounded-xl border border-emerald-500/20 bg-emerald-500/[0.06] p-3 text-xs text-emerald-100"
-				>
-					<svg
-						viewBox="0 0 24 24"
-						class="mt-0.5 h-4 w-4 flex-shrink-0 text-emerald-400"
-						fill="none"
-						stroke="currentColor"
-						stroke-width="2.5"
-						stroke-linecap="round"
-						stroke-linejoin="round"
-						aria-hidden="true"
-					>
-						<polyline points="20 6 9 17 4 12" />
-					</svg>
-					<div class="min-w-0 flex-1">
-						<p class="font-medium text-emerald-50">
-							Connected — {cookies.length} cookie{cookies.length === 1 ? '' : 's'} saved
-						</p>
-						{#if cookiesSavedAt}
-							<p class="mt-0.5 text-emerald-100/70">
-								Saved {new Date(cookiesSavedAt).toLocaleString()}. Stored only in this
-								browser.
-							</p>
-						{/if}
-					</div>
-				</div>
-			{/if}
-		</div>
-
-		<div
-			class="flex flex-col-reverse gap-2 border-t border-white/10 bg-black/30 p-4 sm:flex-row sm:items-center sm:justify-end"
-		>
-			{#if isConnected}
-				<button
-					type="button"
-					onclick={() => {
-						disconnect();
-						closeConnect();
-					}}
-					class="rounded-xl border border-white/10 bg-transparent px-4 py-2 text-sm font-medium text-zinc-400 transition hover:bg-white/5 hover:text-zinc-200 sm:mr-auto"
-				>
-					Disconnect
-				</button>
-			{/if}
-			<button
-				type="button"
-				onclick={closeConnect}
-				class="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-2 text-sm font-medium text-zinc-300 transition hover:bg-white/[0.06]"
-			>
-				Cancel
-			</button>
-			<button
-				type="button"
-				onclick={saveCookies}
-				disabled={!connectInput.trim()}
-				class="rounded-xl bg-brand-500 px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-brand-500/20 transition hover:bg-brand-400 active:scale-[0.98] disabled:cursor-not-allowed disabled:bg-zinc-800 disabled:text-zinc-500 disabled:shadow-none"
-			>
-				Save & connect
-			</button>
-		</div>
-	</div>
-{/if}

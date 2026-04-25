@@ -1,24 +1,57 @@
 # YT → MP3
 
-A SvelteKit + Svelte 5 web app that converts YouTube videos to high-quality MP3
-audio. The MP3 encoding happens **entirely in the user's browser** — the server's
-only job is to resolve the video stream and proxy the compressed audio bytes
-(which is unavoidable because of YouTube's CORS policy).
+A self-hosted SvelteKit + Svelte 5 app that converts YouTube videos to
+high-quality MP3 audio. The MP3 encoding happens **entirely in your
+browser** — the server's only job is to resolve the audio stream from
+YouTube and proxy the bytes back to the page.
 
-Built to deploy on Vercel. Tooling is set up for [Bun](https://bun.sh).
+Built to run **locally on your own machine**, on your own residential IP,
+which is what keeps YouTube from rate-limiting you. Public deployments
+to Vercel / cloud platforms get blocked almost immediately because
+YouTube actively flags datacenter IP ranges — so this project is
+deliberately set up as a personal tool, not a public web app.
+
+---
+
+## Quickstart
+
+You need **Node.js 20+** (Bun is fine for installing dependencies and
+running the dev server, but the *built* server has to run on Node — see
+[Why Node, not Bun](#why-node-not-bun) below).
+
+```sh
+# Install Node from https://nodejs.org if you haven't already.
+# Optional: install Bun from https://bun.sh for faster `install`.
+
+git clone https://github.com/naousislam/yt-mp3.git
+cd yt-mp3
+bun install         # or: npm install
+bun run build       # or: npm run build
+bun run start       # or: npm run start
+```
+
+Open <http://localhost:3000>, paste a YouTube URL, click **Fetch** →
+**Convert to MP3**, and your MP3 downloads.
+
+For development with hot-reload:
+
+```sh
+bun run dev         # or: npm run dev
+# open http://localhost:5173
+```
 
 ---
 
 ## How it works
 
 ```
- ┌──────────┐    1. /api/info       ┌──────────────────────┐
+ ┌──────────┐    1. POST /api/info  ┌──────────────────────┐
  │          │  ───────────────────▶ │ ytdl-core resolves   │
  │  Browser │                       │ video metadata       │
  │          │ ◀──────────────────── │                      │
  │          │    metadata + format  └──────────────────────┘
  │          │
- │          │    2. /api/stream     ┌──────────────────────┐
+ │          │    2. POST /api/stream┌──────────────────────┐
  │          │  ───────────────────▶ │ ytdl-core re-resolves│
  │          │                       │ + proxies audio bytes│
  │          │ ◀──────────────────── │ from googlevideo     │
@@ -34,90 +67,47 @@ Built to deploy on Vercel. Tooling is set up for [Bun](https://bun.sh).
 
 Two reasons it can't be 100% client-side:
 
-1. **YouTube signs its audio URLs.** The signature ciphers change frequently and
-   only `ytdl-core` (Node-only) keeps up.
-2. **CORS.** googlevideo.com refuses cross-origin browser requests, so even if
-   we had the URL we couldn't `fetch` it from the page.
+1. **YouTube signs its audio URLs.** The signature ciphers change
+   frequently and only `ytdl-core` (Node-only) keeps up.
+2. **CORS.** googlevideo.com refuses cross-origin browser requests, so
+   even if we had the URL we couldn't `fetch` it from the page.
 
-`ytdl-core` runs on the server, resolves a fresh URL on every request (they
-expire quickly), and pipes the bytes back to the browser. Everything after the
-download — decoding, resampling, encoding — happens in the browser using
-[`@breezystack/lamejs`](https://www.npmjs.com/package/@breezystack/lamejs) and
-the native `Web Audio API`.
+`ytdl-core` runs on the server, resolves a fresh URL on every request
+(they expire quickly), and pipes the bytes back to the browser.
+Everything after the download — decoding, resampling, encoding —
+happens in the browser using
+[`@breezystack/lamejs`](https://www.npmjs.com/package/@breezystack/lamejs)
+and the native `Web Audio API`.
 
 ---
 
-## "Connect YouTube" — per-user cookie auth
+## Why local, not cloud?
 
-YouTube blocks unauthenticated requests from datacenter IP ranges (Vercel,
-AWS, etc.) with a **"sign in to confirm you're not a bot"** error. Almost
-every `ytdl-core`-on-Vercel deployment hits this.
+The short version: **YouTube blocks datacenter IPs**. Vercel, AWS,
+Render, Cloudflare Workers — all of their public IP ranges are flagged
+by YouTube's anti-bot system. As soon as you deploy this app to one of
+them, you'll see this error on every fetch:
 
-This app's workaround is **per-user cookie auth**: each user pastes their own
-YouTube session cookies once, and the server forwards those cookies to
-`ytdl-core` on every request. With a real session attached, YouTube treats
-the request as a normal browser hit and serves the audio.
+> YouTube is requiring sign-in for this video. Try a different video.
 
-### How it works end-to-end
+This is YouTube's "we think you're a bot" response, and it's
+non-negotiable for unauthenticated requests from cloud IPs.
 
-1. User clicks **Connect YouTube** in the header
-2. They follow the in-app instructions to export cookies from a logged-in
-   `youtube.com` tab using a browser extension
-3. They paste the cookie blob into the textarea — we accept Netscape
-   `cookies.txt`, JSON arrays, or `name=value; name=value` header strings
-4. Cookies are parsed client-side, filtered down to the ~20 names YouTube
-   actually uses for auth (everything else is dropped), and saved to
-   `localStorage`
-5. On every `/api/info` and `/api/stream` request, the cookies are sent in
-   the **POST request body** (not the URL — never leak auth into logs)
-6. The server builds a `ytdl.createAgent(cookies)` per request and uses it
-   for both the metadata lookup and the googlevideo download
+Running the same code from your **home network** sidesteps the problem
+entirely. Your residential IP has years of legitimate YouTube traffic
+attached to it; YouTube treats requests from it as normal browser
+activity and serves the audio without complaint.
 
-### Trust model — be honest with users
+### What about the IP-ban risk?
 
-Cookies travel through our server to reach YouTube, so the operator of the
-deployment can technically see them in transit. The app is engineered to
-minimize this:
+For personal use (a handful of conversions a day), risk is essentially
+zero. YouTube's rate-limiting on residential IPs is mild and temporary
+— you might see a captcha if you go wild, but you won't get a
+"permanent" anything. See the chat history of this repo's development
+for a fuller breakdown.
 
-- **Nothing is persisted server-side.** Cookies are read from the request
-  body, attached to one outbound `ytdl-core` call, and forgotten when the
-  request ends.
-- **Storage is client-only.** Cookies live in the user's `localStorage`,
-  never in a database.
-- **Filtered to auth cookies.** We drop everything that isn't a Google /
-  YouTube session cookie before sending — no analytics, no ad cookies.
-- **HTTPS-only in production.** Vercel terminates TLS for us.
-
-That said, **session cookies grant full account access**. The app
-deliberately tells users to sign in with a **throwaway Google account**, not
-their main one. We surface that warning in the connect dialog every time.
-
-### Files involved
-
-| File                              | What it does                                                  |
-| --------------------------------- | ------------------------------------------------------------- |
-| `src/lib/cookies.ts`              | Parses 3 cookie formats, filters auth-only, localStorage I/O |
-| `src/routes/api/info/+server.ts`  | Accepts `POST { url, cookies }`, builds `ytdl.createAgent()` |
-| `src/routes/api/stream/+server.ts`| Same auth flow; also passes cookies to googlevideo            |
-| `src/routes/+page.svelte`         | "Connect YouTube" dialog + auto-prompt on `401` errors        |
-
-### Status codes you'll see
-
-| Code | Meaning                                                                  |
-| ---- | ------------------------------------------------------------------------ |
-| 401  | YouTube wants auth. Client auto-opens the connect dialog.                |
-| 403  | Age-restricted video. Cookies don't help; this is enforced server-side.  |
-| 404  | Video unavailable / private / region-blocked.                            |
-| 413  | Video exceeds the 15-minute limit.                                       |
-| 502  | YouTube returned an error or `ytdl-core` failed to parse a response.     |
-
-### Cookie expiry
-
-YouTube's session cookies typically last weeks to months. When they expire,
-the server returns `401` with the message **"Your YouTube cookies were
-rejected. They may have expired — please reconnect."** and the connect
-dialog opens automatically. The user re-exports cookies and pastes again —
-no code changes needed.
+If you bulk-convert hundreds of videos in quick succession, expect a
+captcha on YouTube for a few hours. Don't do that.
 
 ---
 
@@ -127,10 +117,10 @@ no code changes needed.
 | ------------ | ----------------------------------------------------------- |
 | Framework    | SvelteKit 2 + Svelte 5 (runes mode)                         |
 | Styling      | Tailwind CSS v4 (via `@tailwindcss/vite`)                   |
-| Adapter      | `@sveltejs/adapter-vercel` (Node 22 serverless functions)   |
+| Adapter      | `@sveltejs/adapter-node` (self-contained Node server)       |
 | Server-side  | `@distube/ytdl-core` (actively maintained `ytdl-core` fork) |
 | Client-side  | Web Audio API + `@breezystack/lamejs` (MP3 encoder in JS)   |
-| Tooling      | Bun (install, dev, build)                                   |
+| Tooling      | Bun for installs / dev (Node for the production server)     |
 
 ---
 
@@ -141,8 +131,10 @@ src/
 ├── app.css                     Tailwind v4 entry + custom theme tokens
 ├── app.html                    Static HTML shell
 ├── lib/
+│   ├── api-types.ts            Shared types for client ↔ server
+│   ├── cookies.ts              (Inert) optional cookie auth — see below
 │   ├── youtube.ts              URL parsing, formatting, sanitization
-│   └── mp3.ts                  Client-side download → decode → encode pipeline
+│   └── mp3.ts                  Client-side download → decode → encode
 └── routes/
     ├── +layout.svelte          Imports global styles
     ├── +page.svelte            The whole UI lives here
@@ -153,98 +145,106 @@ src/
 
 ---
 
-## Local development with Bun
+## Why Node, not Bun
 
-> Vercel does **not** support a Bun runtime for serverless functions yet. We use
-> Bun for local development and dependency management; the deployed functions
-> run on `nodejs22.x`. This is the standard "Bun + Vercel" workflow today.
+Bun is great for installing dependencies and running Vite during
+development. But for the built server (`bun run build` →
+`build/index.js`), you should run it with **Node**, not Bun.
 
-### Prerequisites
+The reason: `@distube/ytdl-core` calls
+`undici.Agent.compose()` for cookie-jar / IPv6 handling. Bun ships its
+own bundled `undici` polyfill that **doesn't implement
+`Agent.compose()`** as of writing. Running the built server with `bun
+./build/index.js` will crash at first request with:
 
-- [Bun](https://bun.sh) ≥ 1.1
-- A modern browser. The MP3 encoder uses standard Web Audio APIs supported in
-  Chrome, Edge, Firefox, Safari (incl. iOS 14+).
-
-### Get started
-
-```sh
-bun install
-bun run dev
+```
+TypeError: this.compose is not a function
 ```
 
-Then open <http://localhost:5173>.
+Two options:
 
-### Available scripts
+- **Run the built server with Node** (recommended): `node
+  ./build/index.js` or `bun run start` (which calls `node` under the
+  hood — check `package.json`).
+- **Install plain `undici`** and import it explicitly in
+  `src/routes/api/info/+server.ts` and `src/routes/api/stream/+server.ts`
+  before calling `ytdl-core`. This works but is fragile because Bun
+  aggressively intercepts `undici` imports.
 
-```sh
-bun run dev          # vite dev server with HMR
-bun run build        # production build (uses adapter-vercel output format)
-bun run preview      # preview the production build locally
-bun run check        # type-check the entire project
-```
-
-You can also use `bunx` to run any CLI tool from `package.json` without
-installing globally — e.g. `bunx svelte-kit sync`.
+The dev server (`bun run dev`) is fine on Bun — Vite's SSR module
+loader doesn't trigger the broken codepath.
 
 ---
 
-## Deploying to Vercel
+## API endpoints
 
-1. Push the repo to GitHub.
-2. Import the repo in Vercel — no environment variables required.
-3. Vercel auto-detects SvelteKit. Leave the framework preset as-is.
+Both endpoints accept `POST` with a JSON body:
 
-### Vercel configuration
-
-The function configuration is set in `svelte.config.js`:
-
-```js
-adapter({
-    runtime: 'nodejs22.x',
-    memory: 1024,
-    maxDuration: 60
-})
+```jsonc
+// POST /api/info
+{
+  "url": "https://youtube.com/watch?v=…", // or a bare 11-char video ID
+  "cookies": []                           // optional, see "Cookie auth"
+}
 ```
 
-- **`maxDuration: 60`** — Hobby plans cap out at 60s; this is intentional. The
-  15-minute video limit was chosen partly so a typical encode + download fits
-  comfortably inside that window. For Pro plans you can raise this to `300`.
-- **`memory: 1024`** — `ytdl-core` is happy with the default 1 GB.
-
-### Things that may break in production
-
-- **YouTube blocking Vercel IPs.** YouTube actively rate-limits known
-  serverless / datacenter IP ranges. If `/api/info` starts returning 502s, that
-  is almost always why. Workarounds usually involve a residential proxy.
-- **`ytdl-core` lagging behind a YouTube change.** Whenever YouTube tweaks
-  their player JS, signatures temporarily break. Update `@distube/ytdl-core` to
-  the latest version when this happens — that fork ships fixes within days.
-- **Live streams / age-restricted videos** are explicitly refused. The error
-  message from `/api/info` will tell you which it was.
-
-### Building locally on Windows
-
-`bun run build` (or `npm run build`) may fail at the very end with:
-
-```
-Error: EPERM: operation not permitted, symlink '![-]\0.func' -> '.vercel\output\functions\index.func'
+```jsonc
+// POST /api/stream
+{
+  "url": "…",
+  "cookies": []
+}
 ```
 
-This is a Windows-specific quirk: `@sveltejs/adapter-vercel` creates symlinks
-inside `.vercel/output/`, and Windows blocks symlink creation for non-admin
-users by default. **It does not affect deployments** — Vercel builds on Linux
-where symlinks work normally, so `vercel deploy` and Git-triggered builds
-both succeed.
+A `GET` variant is also exposed for `curl` / address-bar testing
+during development. It accepts only `?url=` and cannot pass cookies.
 
-To run a successful local build on Windows, pick one:
+### Status codes you'll see
 
-- Enable [Developer Mode](https://learn.microsoft.com/en-us/windows/apps/get-started/enable-your-device-for-development)
-  (Settings → Privacy & security → For developers → Developer Mode), then run
-  `bun run build` in a fresh terminal. This is the easiest fix.
-- Run the build terminal **as Administrator**.
-- Use WSL2 / Git Bash, where symlinks behave like on Linux.
-- Skip the local production build entirely and rely on `bun run dev` plus
-  Vercel's preview deployments.
+| Code | Meaning                                                                   |
+| ---- | ------------------------------------------------------------------------- |
+| 401  | YouTube wants auth. On a public deploy, this is the IP block.             |
+| 403  | Age-restricted video. There is no workaround in this app.                 |
+| 404  | Video unavailable / private / region-blocked.                             |
+| 413  | Video exceeds the 15-minute limit.                                        |
+| 502  | YouTube returned an error or `ytdl-core` failed to parse a response.      |
+
+---
+
+## Cookie auth (optional, advanced)
+
+The server-side cookie support from earlier iterations of this project
+is still in the code (`src/lib/cookies.ts`, plus the `cookies` field on
+both API endpoints), but the UI for it has been removed because it was
+too clunky and pushed users toward risky behavior (pasting their entire
+Google session into a web form).
+
+If you really want to run this on a cloud host where YouTube blocks the
+IP, you can:
+
+1. Sign in to youtube.com with a **throwaway Google account** (never
+   your main one — session cookies grant full account access).
+2. Export cookies using a browser extension like
+   [Get cookies.txt LOCALLY](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc).
+3. Send them in the request body:
+
+   ```sh
+   curl -X POST http://your-server/api/info \
+     -H 'Content-Type: application/json' \
+     -d '{
+       "url": "https://youtube.com/watch?v=…",
+       "cookies": [
+         {"name": "SID", "value": "…", "domain": ".youtube.com"},
+         {"name": "__Secure-1PSID", "value": "…", "domain": ".youtube.com"}
+       ]
+     }'
+   ```
+
+The server will use those cookies via `ytdl.createAgent(cookies)` for
+that single request and forget them afterward.
+
+This path is unsupported / undocumented in the UI on purpose. If you
+add a UI for it, please keep the throwaway-account warning prominent.
 
 ---
 
@@ -253,27 +253,58 @@ To run a successful local build on Windows, pick one:
 | Limit                | Value     | Where enforced                          |
 | -------------------- | --------- | --------------------------------------- |
 | Max video length     | 15 min    | `MAX_DURATION_SECONDS` in `lib/youtube` |
-| Function timeout     | 60 s      | `svelte.config.js`                      |
 | Output bitrate range | 128–320   | `+page.svelte` quality picker           |
 | Live streams         | rejected  | `/api/info` and `/api/stream`           |
 | Age-restricted       | rejected  | `/api/info`                             |
 
-Encoding speed depends on the user's device. As a rough guide, encoding a
-10-minute video to 192 kbps MP3 on a mid-range laptop takes ~6–8 seconds; on a
-phone it's closer to 20 s.
+Encoding speed depends on the user's device. As a rough guide, encoding
+a 10-minute video to 192 kbps MP3 on a mid-range laptop takes ~6–8
+seconds; on a phone it's closer to 20 s.
+
+---
+
+## Configuration
+
+The Node adapter binds to `HOST` and `PORT` environment variables, both
+optional:
+
+```sh
+PORT=8080 HOST=0.0.0.0 bun run start
+```
+
+By default the server listens on `0.0.0.0:3000`.
+
+If you want to expose this to your home network so phones / tablets on
+the same Wi-Fi can hit it, bind to `0.0.0.0` and visit
+`http://YOUR_LAN_IP:3000` from the phone.
+
+---
+
+## Development scripts
+
+```sh
+bun run dev          # vite dev server with HMR (port 5173)
+bun run build        # production build → ./build
+bun run start        # node ./build/index.js (port 3000)
+bun run preview      # vite's preview of the built app
+bun run check        # svelte-check + tsc
+```
+
+Replace `bun run` with `npm run` if you prefer npm.
 
 ---
 
 ## Legal notice
 
 Downloading content from YouTube generally violates
-[YouTube's Terms of Service](https://www.youtube.com/t/terms) unless you own
-the content, the content is in the public domain, or YouTube provides a
-download button for it.
+[YouTube's Terms of Service](https://www.youtube.com/t/terms) unless
+you own the content, the content is in the public domain, or YouTube
+provides a download button for it.
 
-This project is intended for **educational and personal use** — for example,
-downloading your own uploads, podcasts you have permission to redistribute, or
-public-domain recordings. You are responsible for how you use it.
+This project is intended for **educational and personal use** — for
+example, downloading your own uploads, podcasts you have permission to
+redistribute, or public-domain recordings. You are responsible for how
+you use it.
 
 ---
 
