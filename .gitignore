@@ -34,6 +34,10 @@ Thumbs.db
 # Bun cache
 .bun
 
+# Local curl / debugging artifacts
+stream-out.bin
+server.log
+
 # Debug player-script dumps that ytdl-core writes to the project root
 # whenever it fails to parse YouTube's signature cipher. Harmless but
 # noisy in `git status`.
