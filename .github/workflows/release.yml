@@ -1,0 +1,211 @@
+# Build and publish standalone desktop binaries on every version tag.
+#
+# How a release works:
+#
+#   1. Bump `version` in package.json and commit.
+#   2. Tag the commit:  git tag v0.1.0 && git push --tags
+#   3. This workflow runs automatically on the tag push.
+#   4. Three jobs build the Windows, macOS, and Linux binaries in
+#      parallel — each on its own native runner so the host OS is
+#      the same as the target. (We could cross-compile from a single
+#      Linux runner, but native builds catch OS-specific bugs faster
+#      and are negligibly more expensive on free-tier minutes.)
+#   5. A final `release` job collects every artifact and publishes a
+#      GitHub Release with the binaries attached.
+#
+# What end users see: a new release on the GitHub releases page with
+# downloadable `yt-mp3.exe`, `yt-mp3-macos-arm64`, `yt-mp3-macos-x64`,
+# and `yt-mp3-linux` files. They click the right one for their OS,
+# double-click it, and the app opens in their browser.
+
+name: release
+
+on:
+  push:
+    tags:
+      # Match SemVer-ish tags like v0.1.0, v1.2.3-rc1, etc. Plain
+      # branch pushes don't trigger this workflow — only tags.
+      - "v*"
+
+# We need write access to releases to upload the binaries.
+permissions:
+  contents: write
+
+jobs:
+  # -------------------------------------------------------------------------
+  # Build matrix: one job per (OS, arch) pair we ship binaries for.
+  #
+  # Each job runs `bun run package:<os>` which:
+  #   - Downloads the right yt-dlp binary into ./bin (postinstall)
+  #   - Runs the SvelteKit production build
+  #   - Invokes pkg in SEA mode to produce the standalone executable
+  #
+  # The matrix covers Windows x64, macOS Intel, macOS Apple Silicon,
+  # and Linux x64. ARM Linux is skipped because GitHub-hosted runners
+  # for arm64 Linux were paid-only at the time this was written; if
+  # you need an arm64 Linux build, run `bun run package:linux` on
+  # an arm64 host yourself and upload it manually.
+  # -------------------------------------------------------------------------
+  build:
+    name: build (${{ matrix.label }})
+    strategy:
+      # Don't cancel sibling builds when one fails; we'd rather
+      # publish whichever platforms succeeded than block on a
+      # transient runner issue on one OS.
+      fail-fast: false
+      matrix:
+        include:
+          - label: windows-x64
+            os: windows-latest
+            script: package:win
+            # Glob that picks up the binary pkg writes to ./dist.
+            # Different scripts produce different filenames; we
+            # encode the expected output explicitly so the upload
+            # step doesn't accidentally pick up stale debug builds.
+            artifact_glob: dist/yt-mp3.exe
+            artifact_name: yt-mp3-windows-x64.exe
+          - label: macos-arm64
+            os: macos-latest # macos-latest is arm64 (Apple Silicon)
+            # Per-arch script so the runner only builds the binary
+            # it actually has to ship; cross-compiling both targets
+            # from each Mac runner would just waste minutes.
+            script: package:mac-arm64
+            artifact_glob: dist/yt-mp3-macos-arm64
+            artifact_name: yt-mp3-macos-arm64
+          - label: macos-x64
+            os: macos-13 # macos-13 is the last Intel runner image
+            script: package:mac-x64
+            artifact_glob: dist/yt-mp3-macos-x64
+            artifact_name: yt-mp3-macos-x64
+          - label: linux-x64
+            os: ubuntu-latest
+            script: package:linux
+            artifact_glob: dist/yt-mp3-linux
+            artifact_name: yt-mp3-linux-x64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Check out the source
+        uses: actions/checkout@v4
+
+      # Bun handles installs and the launcher / dev scripts. The
+      # actual server runtime inside the binary is Node — pkg
+      # bundles its own Node, we don't need it on the runner.
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          # Pin to a known-good Bun version so a Bun release that
+          # accidentally breaks our build doesn't break our CI on
+          # a Tuesday afternoon. Bump intentionally.
+          bun-version: "1.1.x"
+
+      - name: Install dependencies
+        # `bun install --frozen-lockfile` is the equivalent of
+        # `npm ci` — fails the build if bun.lock and package.json
+        # disagree, instead of silently regenerating the lockfile.
+        # The postinstall hook downloads yt-dlp into ./bin during
+        # this step.
+        run: bun install --frozen-lockfile
+
+      - name: Build the standalone binary
+        run: bun run ${{ matrix.script }}
+
+      # The macOS package script produces both arm64 and x64
+      # binaries in one invocation, but each runner only needs
+      # one of them. We rename the file from pkg's default
+      # `yt-mp3-macos-{arch}` / `yt-mp3.exe` to a stable name
+      # the upload step can find.
+      - name: Stage the artifact
+        shell: bash
+        run: |
+          mkdir -p staged
+          # Some pkg targets emit a different filename than ours;
+          # match anything starting with `yt-mp3` and copy the
+          # first match. The matrix's artifact_glob narrows that.
+          src="$(ls ${{ matrix.artifact_glob }} 2>/dev/null | head -n1 || true)"
+          if [ -z "$src" ]; then
+            echo "::error::No binary found at ${{ matrix.artifact_glob }}"
+            ls -la dist/ || true
+            exit 1
+          fi
+          cp "$src" "staged/${{ matrix.artifact_name }}"
+          ls -la staged/
+
+      # Upload as a workflow artifact so the release job can
+      # collect it. Artifact names must be unique across the
+      # matrix — using the platform label keeps that simple.
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: staged/${{ matrix.artifact_name }}
+          # 7 days is plenty: the release job runs immediately
+          # after this one, and we don't need long-term storage
+          # of intermediates.
+          retention-days: 7
+          if-no-files-found: error
+
+  # -------------------------------------------------------------------------
+  # Once every platform has built successfully, gather all the
+  # artifacts and publish them as a GitHub Release.
+  # -------------------------------------------------------------------------
+  release:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          # Drop every artifact into ./dist with no extra subdirs,
+          # so softprops/action-gh-release can glob `dist/*`.
+          path: dist
+          merge-multiple: true
+
+      - name: List downloaded files
+        # Useful to have in the workflow log when something goes
+        # wrong — confirms which platforms made it to this stage.
+        run: ls -la dist/
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          # Title and tag are taken from the pushed tag (e.g. v0.1.0).
+          # `generate_release_notes: true` asks GitHub to write the
+          # changelog from merged PR titles since the previous tag,
+          # which gives a reasonable starting point that the
+          # maintainer can edit by hand if they want.
+          generate_release_notes: true
+          # Mark non-final tags (v1.0.0-rc1, v0.1.0-beta) as
+          # prereleases so users on the releases page don't
+          # accidentally download a half-baked build as "latest".
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          # Attach every binary we collected.
+          files: |
+            dist/yt-mp3-windows-x64.exe
+            dist/yt-mp3-macos-arm64
+            dist/yt-mp3-macos-x64
+            dist/yt-mp3-linux-x64
+          # A short body shown above the auto-generated notes.
+          # Keeps the user-facing instructions in front of the
+          # changelog, which is what most people want to see.
+          body: |
+            ## Download
+
+            Pick the file for your OS, double-click to run, and the app opens in your browser.
+
+            | Platform | File |
+            | --- | --- |
+            | Windows (x64) | `yt-mp3-windows-x64.exe` |
+            | macOS (Apple Silicon) | `yt-mp3-macos-arm64` |
+            | macOS (Intel) | `yt-mp3-macos-x64` |
+            | Linux (x64) | `yt-mp3-linux-x64` |
+
+            > **macOS / Linux:** make the binary executable first with `chmod +x yt-mp3-*` if it isn't already. macOS may also block the first launch under Gatekeeper — right-click → Open, or run `xattr -d com.apple.quarantine yt-mp3-macos-*`.
+
+            ---
+        env:
+          # Provided automatically by Actions; required for the
+          # action to push the release through the GitHub API.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

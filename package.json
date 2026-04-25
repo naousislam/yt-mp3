@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "bin": "scripts/launcher.mjs",
   "scripts": {
     "dev": "vite dev",
     "build": "vite build",
@@ -11,7 +12,57 @@
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "postinstall": "node ./scripts/install-yt-dlp.mjs",
-    "yt-dlp:update": "node ./scripts/install-yt-dlp.mjs --force"
+    "yt-dlp:update": "node ./scripts/install-yt-dlp.mjs --force",
+    "package": "bun run build && pkg . --sea --compress GZip --out-path dist",
+    "package:win": "bun run build && pkg . --sea --targets node22-win-x64 --compress GZip --out-path dist",
+    "package:mac": "bun run build && pkg . --sea --targets node22-macos-x64,node22-macos-arm64 --compress GZip --out-path dist",
+    "package:mac-arm64": "bun run build && pkg . --sea --targets node22-macos-arm64 --compress GZip --out-path dist",
+    "package:mac-x64": "bun run build && pkg . --sea --targets node22-macos-x64 --compress GZip --out-path dist",
+    "package:linux": "bun run build && pkg . --sea --targets node22-linux-x64 --compress GZip --out-path dist"
+  },
+  "pkg": {
+    "//": [
+      "Configuration for @yao-pkg/pkg. See https://yao-pkg.github.io/pkg/.",
+      "",
+      "Why each field is here:",
+      "",
+      "  - `scripts` lists JS files to bake into the pkg snapshot in",
+      "    addition to whatever the launcher require()s. We point at the",
+      "    full SvelteKit Node server output so every chunk is bundled,",
+      "    not just the entrypoint module's static dependencies.",
+      "",
+      "  - `assets` lists *non-JS* files (HTML, CSS, fonts, images, the",
+      "    yt-dlp binary) that need to be readable at runtime. pkg only",
+      "    bundles the assets you list — it can't infer them from",
+      "    `fs.readFileSync` calls — so we glob the entire client/server",
+      "    static directories.",
+      "",
+      "  - `targets` is omitted on purpose: the value is supplied at the",
+      "    command line via the `package:*` npm scripts so we can build",
+      "    Windows / macOS / Linux artifacts independently from CI."
+    ],
+    "scripts": [
+      "build/**/*.js",
+      "build/**/*.cjs",
+      "build/**/*.mjs"
+    ],
+    "assets": [
+      "build/**/*.html",
+      "build/**/*.css",
+      "build/**/*.json",
+      "build/**/*.svg",
+      "build/**/*.png",
+      "build/**/*.jpg",
+      "build/**/*.webp",
+      "build/**/*.ico",
+      "build/**/*.woff",
+      "build/**/*.woff2",
+      "build/**/*.ttf",
+      "build/client/**/*",
+      "build/server/**/*",
+      "bin/yt-dlp",
+      "bin/yt-dlp.exe"
+    ]
   },
   "devDependencies": {
     "@sveltejs/adapter-node": "^5.5.4",
@@ -19,6 +70,7 @@
     "@sveltejs/vite-plugin-svelte": "^5.0.3",
     "@tailwindcss/vite": "^4.0.0",
     "@types/node": "^22.10.2",
+    "@yao-pkg/pkg": "^6.19.0",
     "svelte": "^5.16.0",
     "svelte-check": "^4.1.1",
     "tailwindcss": "^4.0.0",

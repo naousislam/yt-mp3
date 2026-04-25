@@ -44,15 +44,30 @@ const BINARY_NAME = platform === "win32" ? "yt-dlp.exe" : "yt-dlp";
  * pointing at the install script.
  */
 function resolveBinaryPath(): string {
-	const candidate = join(process.cwd(), "bin", BINARY_NAME);
-	if (!existsSync(candidate)) {
-		throw new Error(
-			`yt-dlp binary not found at ${candidate}. ` +
-				`Run \`bun run yt-dlp:update\` (or \`npm run yt-dlp:update\`) ` +
-				`to download it.`,
-		);
-	}
-	return candidate;
+  // Allow an explicit override via env var. The packaged desktop
+  // launcher uses this to point at the yt-dlp binary it extracts
+  // from inside the bundled `.exe` to a writable temp directory at
+  // startup — that path isn't `<cwd>/bin/...` so the default
+  // lookup below would never find it.
+  const override = process.env.YT_DLP_PATH;
+  if (override && override.length > 0) {
+    if (!existsSync(override)) {
+      throw new Error(
+        `YT_DLP_PATH is set to ${override} but no file exists there.`,
+      );
+    }
+    return override;
+  }
+
+  const candidate = join(process.cwd(), "bin", BINARY_NAME);
+  if (!existsSync(candidate)) {
+    throw new Error(
+      `yt-dlp binary not found at ${candidate}. ` +
+        `Run \`bun run yt-dlp:update\` (or \`npm run yt-dlp:update\`) ` +
+        `to download it.`,
+    );
+  }
+  return candidate;
 }
 
 /**
@@ -64,50 +79,50 @@ function resolveBinaryPath(): string {
  * them) so we can pick them up without an intermediate transform.
  */
 export type YtDlpFormat = {
-	/** yt-dlp's internal format identifier (numeric or string). */
-	format_id: string;
-	/** Container extension: `m4a`, `webm`, `mp3`, ... */
-	ext: string;
-	/** Bitrate in kbps as reported by YouTube. May be missing. */
-	abr?: number | null;
-	/** Total bitrate in kbps; falls back to `abr` when audio-only. */
-	tbr?: number | null;
-	/** Audio codec name: `mp4a.40.2`, `opus`, `aac`, ... */
-	acodec?: string | null;
-	/** Video codec; `'none'` for audio-only formats. */
-	vcodec?: string | null;
-	/** Audio sample rate in Hz, e.g. 44100. */
-	asr?: number | null;
-	/** Number of audio channels. */
-	audio_channels?: number | null;
-	/** Direct googlevideo URL. Useful for debugging only — we don't fetch it. */
-	url?: string | null;
-	/** Reported file size in bytes (sometimes only an estimate is available). */
-	filesize?: number | null;
-	filesize_approx?: number | null;
-	/** Full mime type when present, e.g. `audio/mp4; codecs="mp4a.40.2"`. */
-	mime_type?: string | null;
+  /** yt-dlp's internal format identifier (numeric or string). */
+  format_id: string;
+  /** Container extension: `m4a`, `webm`, `mp3`, ... */
+  ext: string;
+  /** Bitrate in kbps as reported by YouTube. May be missing. */
+  abr?: number | null;
+  /** Total bitrate in kbps; falls back to `abr` when audio-only. */
+  tbr?: number | null;
+  /** Audio codec name: `mp4a.40.2`, `opus`, `aac`, ... */
+  acodec?: string | null;
+  /** Video codec; `'none'` for audio-only formats. */
+  vcodec?: string | null;
+  /** Audio sample rate in Hz, e.g. 44100. */
+  asr?: number | null;
+  /** Number of audio channels. */
+  audio_channels?: number | null;
+  /** Direct googlevideo URL. Useful for debugging only — we don't fetch it. */
+  url?: string | null;
+  /** Reported file size in bytes (sometimes only an estimate is available). */
+  filesize?: number | null;
+  filesize_approx?: number | null;
+  /** Full mime type when present, e.g. `audio/mp4; codecs="mp4a.40.2"`. */
+  mime_type?: string | null;
 };
 
 export type YtDlpThumbnail = {
-	url: string;
-	width?: number;
-	height?: number;
+  url: string;
+  width?: number;
+  height?: number;
 };
 
 export type YtDlpInfo = {
-	id: string;
-	title: string;
-	uploader?: string | null;
-	channel?: string | null;
-	duration?: number | null;
-	is_live?: boolean | null;
-	live_status?: string | null;
-	age_limit?: number | null;
-	availability?: string | null;
-	thumbnail?: string | null;
-	thumbnails?: YtDlpThumbnail[];
-	formats?: YtDlpFormat[];
+  id: string;
+  title: string;
+  uploader?: string | null;
+  channel?: string | null;
+  duration?: number | null;
+  is_live?: boolean | null;
+  live_status?: string | null;
+  age_limit?: number | null;
+  availability?: string | null;
+  thumbnail?: string | null;
+  thumbnails?: YtDlpThumbnail[];
+  formats?: YtDlpFormat[];
 };
 
 /**
@@ -121,55 +136,55 @@ export type YtDlpInfo = {
  * "Video unavailable", "Private video").
  */
 function runToBuffer(args: string[], signal?: AbortSignal): Promise<string> {
-	return new Promise((resolve, reject) => {
-		const child = spawn(resolveBinaryPath(), args, {
-			// Inherit nothing from the parent's stdin; we only care
-			// about stdout/stderr.
-			stdio: ["ignore", "pipe", "pipe"],
-		});
+  return new Promise((resolve, reject) => {
+    const child = spawn(resolveBinaryPath(), args, {
+      // Inherit nothing from the parent's stdin; we only care
+      // about stdout/stderr.
+      stdio: ["ignore", "pipe", "pipe"],
+    });
 
-		// Buffer stdout/stderr until exit. yt-dlp's JSON output for a
-		// single video is tens of KB, so the memory cost is fine.
-		const stdoutChunks: Buffer[] = [];
-		const stderrChunks: Buffer[] = [];
+    // Buffer stdout/stderr until exit. yt-dlp's JSON output for a
+    // single video is tens of KB, so the memory cost is fine.
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
 
-		child.stdout.on("data", (chunk: Buffer) => stdoutChunks.push(chunk));
-		child.stderr.on("data", (chunk: Buffer) => stderrChunks.push(chunk));
+    child.stdout.on("data", (chunk: Buffer) => stdoutChunks.push(chunk));
+    child.stderr.on("data", (chunk: Buffer) => stderrChunks.push(chunk));
 
-		const onAbort = () => {
-			// SIGTERM is enough on POSIX; on Windows, Node translates
-			// it to TerminateProcess which is the closest equivalent.
-			child.kill("SIGTERM");
-		};
-		if (signal) {
-			if (signal.aborted) {
-				onAbort();
-			} else {
-				signal.addEventListener("abort", onAbort, { once: true });
-			}
-		}
+    const onAbort = () => {
+      // SIGTERM is enough on POSIX; on Windows, Node translates
+      // it to TerminateProcess which is the closest equivalent.
+      child.kill("SIGTERM");
+    };
+    if (signal) {
+      if (signal.aborted) {
+        onAbort();
+      } else {
+        signal.addEventListener("abort", onAbort, { once: true });
+      }
+    }
 
-		child.on("error", (err) => {
-			signal?.removeEventListener("abort", onAbort);
-			reject(err);
-		});
+    child.on("error", (err) => {
+      signal?.removeEventListener("abort", onAbort);
+      reject(err);
+    });
 
-		child.on("close", (code) => {
-			signal?.removeEventListener("abort", onAbort);
-			const stdout = Buffer.concat(stdoutChunks).toString("utf8");
-			const stderr = Buffer.concat(stderrChunks).toString("utf8");
-			if (code !== 0) {
-				reject(
-					new YtDlpError(
-						`yt-dlp exited with code ${code}: ${stderr.trim() || "no stderr"}`,
-						{ stderr, exitCode: code ?? -1 },
-					),
-				);
-				return;
-			}
-			resolve(stdout);
-		});
-	});
+    child.on("close", (code) => {
+      signal?.removeEventListener("abort", onAbort);
+      const stdout = Buffer.concat(stdoutChunks).toString("utf8");
+      const stderr = Buffer.concat(stderrChunks).toString("utf8");
+      if (code !== 0) {
+        reject(
+          new YtDlpError(
+            `yt-dlp exited with code ${code}: ${stderr.trim() || "no stderr"}`,
+            { stderr, exitCode: code ?? -1 },
+          ),
+        );
+        return;
+      }
+      resolve(stdout);
+    });
+  });
 }
 
 /**
@@ -179,17 +194,14 @@ function runToBuffer(args: string[], signal?: AbortSignal): Promise<string> {
  * etc., without parsing strings in two places.
  */
 export class YtDlpError extends Error {
-	stderr: string;
-	exitCode: number;
-	constructor(
-		message: string,
-		options: { stderr: string; exitCode: number },
-	) {
-		super(message);
-		this.name = "YtDlpError";
-		this.stderr = options.stderr;
-		this.exitCode = options.exitCode;
-	}
+  stderr: string;
+  exitCode: number;
+  constructor(message: string, options: { stderr: string; exitCode: number }) {
+    super(message);
+    this.name = "YtDlpError";
+    this.stderr = options.stderr;
+    this.exitCode = options.exitCode;
+  }
 }
 
 /**
@@ -210,34 +222,34 @@ export class YtDlpError extends Error {
  *                        updates. Faster startup, no network hop.
  */
 export async function getVideoInfo(
-	url: string,
-	signal?: AbortSignal,
+  url: string,
+  signal?: AbortSignal,
 ): Promise<YtDlpInfo> {
-	const stdout = await runToBuffer(
-		[
-			"--dump-single-json",
-			"--skip-download",
-			"--no-warnings",
-			"--no-playlist",
-			"--no-call-home",
-			url,
-		],
-		signal,
-	);
+  const stdout = await runToBuffer(
+    [
+      "--dump-single-json",
+      "--skip-download",
+      "--no-warnings",
+      "--no-playlist",
+      "--no-call-home",
+      url,
+    ],
+    signal,
+  );
 
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(stdout);
-	} catch (err) {
-		const message = err instanceof Error ? err.message : "invalid JSON";
-		throw new Error(`Could not parse yt-dlp output: ${message}`);
-	}
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "invalid JSON";
+    throw new Error(`Could not parse yt-dlp output: ${message}`);
+  }
 
-	if (!parsed || typeof parsed !== "object") {
-		throw new Error("yt-dlp returned a non-object JSON payload");
-	}
+  if (!parsed || typeof parsed !== "object") {
+    throw new Error("yt-dlp returned a non-object JSON payload");
+  }
 
-	return parsed as YtDlpInfo;
+  return parsed as YtDlpInfo;
 }
 
 /**
@@ -268,78 +280,76 @@ export async function getVideoInfo(
  * connection and exits cleanly.
  */
 export function streamAudio(
-	url: string,
-	signal?: AbortSignal,
+  url: string,
+  signal?: AbortSignal,
 ): {
-	stream: ReadableStream<Uint8Array>;
-	/**
-	 * Resolves to the stderr text once yt-dlp exits, regardless of
-	 * exit code. Useful for surfacing the actual error to the
-	 * client when the stream closes unexpectedly mid-flight.
-	 */
-	stderr: Promise<string>;
-	/** Resolves with yt-dlp's exit code once it has terminated. */
-	exitCode: Promise<number>;
+  stream: ReadableStream<Uint8Array>;
+  /**
+   * Resolves to the stderr text once yt-dlp exits, regardless of
+   * exit code. Useful for surfacing the actual error to the
+   * client when the stream closes unexpectedly mid-flight.
+   */
+  stderr: Promise<string>;
+  /** Resolves with yt-dlp's exit code once it has terminated. */
+  exitCode: Promise<number>;
 } {
-	const child = spawn(
-		resolveBinaryPath(),
-		[
-			"-f",
-			"bestaudio",
-			"-o",
-			"-",
-			"--no-part",
-			"--no-warnings",
-			"--no-playlist",
-			"--no-call-home",
-			"--quiet",
-			url,
-		],
-		{
-			stdio: ["ignore", "pipe", "pipe"],
-		},
-	);
+  const child = spawn(
+    resolveBinaryPath(),
+    [
+      "-f",
+      "bestaudio",
+      "-o",
+      "-",
+      "--no-part",
+      "--no-warnings",
+      "--no-playlist",
+      "--no-call-home",
+      "--quiet",
+      url,
+    ],
+    {
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
 
-	// Collect stderr for the caller's diagnostic use. We don't pipe
-	// it anywhere — the real client only ever sees stdout (the
-	// audio bytes) and a status code.
-	const stderrChunks: Buffer[] = [];
-	child.stderr.on("data", (chunk: Buffer) => stderrChunks.push(chunk));
+  // Collect stderr for the caller's diagnostic use. We don't pipe
+  // it anywhere — the real client only ever sees stdout (the
+  // audio bytes) and a status code.
+  const stderrChunks: Buffer[] = [];
+  child.stderr.on("data", (chunk: Buffer) => stderrChunks.push(chunk));
 
-	const stderr = new Promise<string>((resolve) => {
-		child.on("close", () => {
-			resolve(Buffer.concat(stderrChunks).toString("utf8"));
-		});
-	});
+  const stderr = new Promise<string>((resolve) => {
+    child.on("close", () => {
+      resolve(Buffer.concat(stderrChunks).toString("utf8"));
+    });
+  });
 
-	const exitCode = new Promise<number>((resolve) => {
-		child.on("close", (code) => resolve(code ?? -1));
-	});
+  const exitCode = new Promise<number>((resolve) => {
+    child.on("close", (code) => resolve(code ?? -1));
+  });
 
-	// If the request is aborted mid-flight, kill yt-dlp so it
-	// stops downloading from googlevideo. SIGTERM is portable;
-	// Node maps it to TerminateProcess on Windows.
-	const onAbort = () => child.kill("SIGTERM");
-	if (signal) {
-		if (signal.aborted) {
-			onAbort();
-		} else {
-			signal.addEventListener("abort", onAbort, { once: true });
-		}
-		// Stop listening once the child is gone, so we don't leak
-		// abort handlers if the request finishes normally.
-		child.on("close", () => signal.removeEventListener("abort", onAbort));
-	}
+  // If the request is aborted mid-flight, kill yt-dlp so it
+  // stops downloading from googlevideo. SIGTERM is portable;
+  // Node maps it to TerminateProcess on Windows.
+  const onAbort = () => child.kill("SIGTERM");
+  if (signal) {
+    if (signal.aborted) {
+      onAbort();
+    } else {
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+    // Stop listening once the child is gone, so we don't leak
+    // abort handlers if the request finishes normally.
+    child.on("close", () => signal.removeEventListener("abort", onAbort));
+  }
 
-	// `Readable.toWeb` converts Node's stdout stream into the
-	// standard Web ReadableStream that SvelteKit's `Response`
-	// constructor expects. We cast the type because Node's stream
-	// generic uses `any` while ours is the more specific Uint8Array.
-	const stream = Readable.toWeb(
-		child.stdout,
-	) as ReadableStream<Uint8Array>;
+  // `Readable.toWeb` converts Node's stdout stream into the
+  // standard Web ReadableStream that SvelteKit's `Response`
+  // constructor expects. We cast the type because Node's stream
+  // generic uses `any` while ours is the more specific Uint8Array.
+  const stream = Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>;
 
-	return { stream, stderr, exitCode };
+  return { stream, stderr, exitCode };
 }
 
 /**
@@ -353,24 +363,24 @@ export function streamAudio(
  * AAC reliably (older Safari versions are picky about webm/opus).
  */
 export function pickBestAudioFormat(info: YtDlpInfo): YtDlpFormat | null {
-	const formats = info.formats ?? [];
-	const audioOnly = formats.filter(
-		(f) => f.vcodec === "none" && f.acodec && f.acodec !== "none",
-	);
-	if (audioOnly.length === 0) return null;
+  const formats = info.formats ?? [];
+  const audioOnly = formats.filter(
+    (f) => f.vcodec === "none" && f.acodec && f.acodec !== "none",
+  );
+  if (audioOnly.length === 0) return null;
 
-	const score = (f: YtDlpFormat): number => {
-		// Prefer m4a / mp4 (AAC) over webm / opus. Both decode in
-		// every modern browser, but AAC is more universally
-		// supported and tends to produce smaller intermediate
-		// buffers during decode.
-		const containerScore =
-			f.ext === "m4a" || f.ext === "mp4" ? 1000 : f.ext === "webm" ? 500 : 0;
-		const bitrate = f.abr ?? f.tbr ?? 0;
-		return containerScore + bitrate;
-	};
+  const score = (f: YtDlpFormat): number => {
+    // Prefer m4a / mp4 (AAC) over webm / opus. Both decode in
+    // every modern browser, but AAC is more universally
+    // supported and tends to produce smaller intermediate
+    // buffers during decode.
+    const containerScore =
+      f.ext === "m4a" || f.ext === "mp4" ? 1000 : f.ext === "webm" ? 500 : 0;
+    const bitrate = f.abr ?? f.tbr ?? 0;
+    return containerScore + bitrate;
+  };
 
-	return audioOnly.reduce((best, current) =>
-		score(current) > score(best) ? current : best,
-	);
+  return audioOnly.reduce((best, current) =>
+    score(current) > score(best) ? current : best,
+  );
 }

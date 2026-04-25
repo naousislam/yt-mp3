@@ -37,6 +37,13 @@ Thumbs.db
 # Local curl / debugging artifacts
 stream-out.bin
 server.log
+launcher.log
+
+# Packaged desktop binaries — produced by `bun run package:*`,
+# published as GitHub release artifacts. Each one is 80–110 MB and
+# tied to the OS/arch of the runner that built it; we don't want
+# them in the source tree.
+/dist/
 
 # yt-dlp binary — downloaded fresh by scripts/install-yt-dlp.mjs on
 # every `bun install` / `npm install`. Don't commit it: 18 MB+ per

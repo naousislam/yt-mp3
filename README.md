@@ -13,16 +13,63 @@ deliberately set up as a personal tool, not a public web app.
 
 ---
 
-## Quickstart
+## Download
 
-You need **Node.js 20+** (Bun is fine for installing dependencies and
-running the dev server, but the *built* server has to run on Node — see
-[Why Node, not Bun](#why-node-not-bun) below).
+Pre-built binaries are published on the
+[GitHub releases page](https://github.com/naousislam/yt-mp3/releases/latest).
+No Node, Python, terminal, or developer tools required — download the
+file for your OS, double-click it, and the app opens in your browser.
+
+| Platform              | File                       |
+| --------------------- | -------------------------- |
+| Windows (x64)         | `yt-mp3-windows-x64.exe`   |
+| macOS (Apple Silicon) | `yt-mp3-macos-arm64`       |
+| macOS (Intel)         | `yt-mp3-macos-x64`         |
+| Linux (x64)           | `yt-mp3-linux-x64`         |
+
+Each binary is ~80–110 MB. It bundles its own Node runtime and a
+matching yt-dlp binary, so it has no external dependencies.
+
+### First launch
+
+- **Windows:** double-click the `.exe`. Windows SmartScreen will warn
+  you the publisher is unrecognized (the binary is unsigned) — click
+  **More info → Run anyway**. A console window opens, then your
+  browser pops to the app.
+- **macOS:** the binary is unsigned, so the first launch is blocked
+  by Gatekeeper. Either:
+  - Right-click → **Open** → **Open** in the dialog, or
+  - Run `xattr -d com.apple.quarantine ~/Downloads/yt-mp3-macos-*`
+    once in Terminal.
+
+  After the first launch, double-click works normally.
+- **Linux:** make it executable once with
+  `chmod +x ~/Downloads/yt-mp3-linux-x64`, then run it. Some desktop
+  environments need `xdg-open` installed for the browser-launch step.
+
+### What you'll see
+
+```
+[yt-mp3] Starting YT → MP3…
+[yt-mp3] First run: unpacking yt-dlp (this happens once)…
+[yt-mp3] Server is listening at http://127.0.0.1:3000
+[yt-mp3] Opening your browser…
+[yt-mp3] Keep this window open while you use the app. Close it to quit.
+```
+
+The console window stays open while the app is running. Close it (or
+Ctrl+C) to stop the server. Your browser tab to <http://localhost:3000>
+will then 404 — that's the signal everything is shut down cleanly.
+
+---
+
+## Run from source (developers)
+
+If you want to hack on the app, you can run it from a checkout instead
+of the packaged binary. You'll need **Node.js 20+** at runtime; Bun is
+optional but speeds up installs.
 
 ```sh
-# Install Node from https://nodejs.org if you haven't already.
-# Optional: install Bun from https://bun.sh for faster `install`.
-
 git clone https://github.com/naousislam/yt-mp3.git
 cd yt-mp3
 bun install         # or: npm install
@@ -30,8 +77,7 @@ bun run build       # or: npm run build
 bun run start       # or: npm run start
 ```
 
-Open <http://localhost:3000>, paste a YouTube URL, click **Fetch** →
-**Convert to MP3**, and your MP3 downloads.
+Open <http://localhost:3000> and use the app the same way.
 
 For development with hot-reload:
 
@@ -39,6 +85,19 @@ For development with hot-reload:
 bun run dev         # or: npm run dev
 # open http://localhost:5173
 ```
+
+To rebuild the standalone binary for your platform:
+
+```sh
+bun run package:win        # → dist/yt-mp3.exe
+bun run package:mac-arm64  # → dist/yt-mp3-macos-arm64
+bun run package:mac-x64    # → dist/yt-mp3-macos-x64
+bun run package:linux      # → dist/yt-mp3-linux
+```
+
+The `release` GitHub Actions workflow builds all four targets in
+parallel on every `vX.Y.Z` git tag and attaches them to a new
+GitHub Release.
 
 ---
 
