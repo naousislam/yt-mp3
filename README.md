@@ -20,6 +20,11 @@ Pre-built binaries are published on the
 No Node, Python, terminal, or developer tools required — download the
 file for your OS, double-click it, and the app opens in your browser.
 
+> 📖 **New here?** See **[INSTALL.md](./INSTALL.md)** for a friendly
+> step-by-step walkthrough — covers SmartScreen / Gatekeeper warnings,
+> first-launch quirks, and a usage tutorial. No coding experience
+> needed.
+
 | Platform              | File                                       |
 | --------------------- | ------------------------------------------ |
 | Windows (x64)         | `yt-mp3-windows-x64.exe`                   |
@@ -104,6 +109,49 @@ bun run package:linux      # → dist/yt-mp3-linux
 The `release` GitHub Actions workflow builds all four targets in
 parallel on every `vX.Y.Z` git tag and attaches them to a new
 GitHub Release.
+
+---
+
+## Cutting a release
+
+When YouTube changes something and conversions stop working (every
+1–3 months in practice), or when you want to ship UI changes, cut a
+new release:
+
+```sh
+# 1. Make sure main is clean and pushed.
+git status
+git push
+
+# 2. Bump the version in package.json. Pick the next semver:
+#    - patch (0.1.3 → 0.1.4) for bundled-yt-dlp refreshes
+#    - minor (0.1.3 → 0.2.0) for user-visible features
+#    - major (0.1.3 → 1.0.0) for breaking UI / config changes
+$EDITOR package.json   # bump "version"
+
+git add package.json
+git commit -m "Release v0.1.4"
+git push
+
+# 3. Tag and push.
+git tag v0.1.4
+git push origin v0.1.4
+```
+
+The push of the tag triggers `.github/workflows/release.yml`. About
+3–5 minutes later, three binaries (Windows / macOS arm64 / Linux x64)
+appear at <https://github.com/naousislam/yt-mp3/releases/latest>.
+
+If you want to refresh **only** the bundled yt-dlp (no code changes),
+you still need to cut a new release — the binary is built at tag
+time, not on demand. The fact that `bun install` re-fetches yt-dlp on
+every CI run means a fresh `vX.Y.Z` tag automatically picks up the
+newest yt-dlp without any code edits on your end.
+
+If a release fails partway, fix the cause, bump to the next patch
+version (e.g. `v0.1.4` → `v0.1.5`) and push that. Don't try to reuse
+a tag — git will refuse and you'll waste 10 minutes debugging that
+instead of the actual problem.
 
 ---
 
