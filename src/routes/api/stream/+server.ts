@@ -88,7 +88,77 @@ async function handleStream(request: Request, url: URL): Promise<Response> {
 
   let info: import("youtubei.js").YT.VideoInfo;
   try {
-    info = await yt.getInfo(videoId);
+    // Client fallback list for streaming.
+    //
+    // YouTube exposes multiple "Innertube clients" (WEB, IOS, ANDROID,
+    // TV, WEB_EMBEDDED, ...) and each one returns slightly different
+    // streaming_data. Which clients actually work shifts every few
+    // weeks as YouTube tightens its anti-bot heuristics, so rather
+    // than hard-coding a single client we walk a short list and use
+    // the first one that returns at least one audio-only format with
+    // a usable URL.
+    //
+    // The order below was chosen by trial against the current
+    // (April 2026) YouTube backend:
+    //
+    //   - TV: the smart-TV / embedded-device client. Widest format
+    //     coverage and the hardest for YouTube to fingerprint as a
+    //     bot, since real TVs and Node processes look similar over
+    //     the wire. Tends to keep working when WEB starts failing.
+    //
+    //   - WEB_EMBEDDED: the iframe-embed player client. Secondary
+    //     fallback. Its formats currently decipher cleanly through
+    //     youtubei.js's `Player.decipher` while plain WEB does not.
+    //
+    //   - ANDROID: last-resort fallback for videos that TV and
+    //     WEB_EMBEDDED refuse with "video is unavailable" or that
+    //     trigger parser errors on auth-required responses.
+    //
+    // Clients we deliberately do NOT include:
+    //
+    //   - WEB: `Player.decipher` currently throws "No valid URL to
+    //     decipher" for many videos because of a pending mismatch
+    //     between youtubei.js's player parser and YouTube's latest
+    //     player JS revision.
+    //
+    //   - IOS: `getInfo` works and returns formats with already-
+    //     resolved `url` fields, but those URLs 403 from a plain
+    //     Node `fetch()` even when we exactly match youtubei.js's
+    //     own `STREAM_HEADERS`. Routing the same URLs through
+    //     `info.download()` doesn't help either — that helper
+    //     unconditionally calls `format.decipher(player)`, and
+    //     `Player.decipher()` mishandles IOS-shaped formats. So
+    //     IOS is useful for metadata-only paths but not here.
+    //
+    // If every client in the list fails, we re-throw the last error
+    // so the outer catch can map it to a nice user-facing message
+    // (401 for "sign in required", 404 for "unavailable", etc.)
+    // instead of leaking the raw youtubei.js stack trace.
+    const clientFallback = ["TV", "WEB_EMBEDDED", "ANDROID"] as const;
+    let lastError: unknown = null;
+    let chosen: import("youtubei.js").YT.VideoInfo | null = null;
+    for (const client of clientFallback) {
+      try {
+        chosen = await yt.getInfo(videoId, { client });
+        // If we got streaming data with at least one audio-only
+        // format, that's a working result; stop trying other clients.
+        const audio = chosen.streaming_data?.adaptive_formats?.filter(
+          (f) => f.has_audio && !f.has_video,
+        );
+        if (audio && audio.length > 0) break;
+        // No usable formats — keep trying. Reset `chosen` so we don't
+        // accidentally fall through with empty streaming_data.
+        chosen = null;
+      } catch (e) {
+        lastError = e;
+        // Swallow and try the next client. We surface a single
+        // aggregated error after the loop if everything fails.
+      }
+    }
+    if (!chosen) {
+      throw lastError ?? new Error("All YouTube clients refused the request");
+    }
+    info = chosen;
   } catch (e) {
     const message = e instanceof Error ? e.message : "Unknown error";
     if (/sign in|confirm|bot/i.test(message)) {
@@ -115,18 +185,28 @@ async function handleStream(request: Request, url: URL): Promise<Response> {
     );
   }
 
-  const formats = info.streaming_data?.adaptive_formats ?? [];
-  const format = pickBestAudioFormat(formats);
+  const adaptive = info.streaming_data?.adaptive_formats ?? [];
+  const format = pickBestAudioFormat(adaptive);
   if (!format) {
     error(502, "No suitable audio stream was found for this video");
   }
 
-  // youtubei.js's `download()` resolves the signed URL, deciphers it,
-  // makes the actual googlevideo request, and gives us back a
-  // ReadableStream of the response body. We pin it to the same itag we
-  // selected above so the bytes match the metadata advertised by
-  // /api/info — youtubei.js would otherwise re-run its own format
-  // chooser on each call.
+  // Let youtubei.js do the streaming. Its `info.download()` helper:
+  //   1. Calls `format.decipher(player)` to resolve the signed URL.
+  //      WEB_EMBEDDED formats decipher cleanly today — the IOS path
+  //      we tried earlier returned URLs that 403'd from raw fetches,
+  //      and the WEB path is currently broken on YouTube's latest
+  //      player JS rev.
+  //   2. Appends the session's CPN to the URL.
+  //   3. Sends the exact set of headers googlevideo expects (see
+  //      `STREAM_HEADERS` in youtubei.js's Constants.js).
+  //   4. For audio-only requests, does a single fetch and hands back
+  //      the upstream `ReadableStream` body directly.
+  //
+  // We pin `itag` so the bytes match the metadata that /api/info
+  // advertised to the client; otherwise youtubei.js would re-run its
+  // own format chooser and might pick a different stream than the one
+  // the UI is showing duration / size for.
   let audioStream: ReadableStream<Uint8Array>;
   try {
     audioStream = await info.download({
@@ -141,36 +221,35 @@ async function handleStream(request: Request, url: URL): Promise<Response> {
         "YouTube is blocking this server's IP. Run the app locally on your home network instead.",
       );
     }
+    if (/login required|UNPLAYABLE/i.test(message)) {
+      error(403, "This video is not playable without an account.");
+    }
     console.error("[api/stream] download() failed:", message);
     error(502, `Failed to fetch audio stream: ${message}`);
   }
 
-  // Build response headers. Content-Length comes from the format
-  // metadata so the client can render an accurate progress bar; we
-  // can't pull it from the upstream response because youtubei.js
-  // hides the underlying fetch.
+  // Build the response headers from the format metadata. We don't
+  // get to inspect the upstream `Response` object (youtubei.js hides
+  // it) so content-length / -type come from the format we picked.
   const headers = new Headers();
   if (typeof format.content_length === "number") {
     headers.set("content-length", String(format.content_length));
   }
-  // Strip the "; codecs=..." parameter — only the bare content type
-  // matters to the browser when receiving raw bytes.
+  // Strip "; codecs=..." — only the bare content type matters to the
+  // browser when receiving raw bytes.
   const baseMime = (format.mime_type ?? "audio/mp4").split(";")[0].trim();
   headers.set("content-type", baseMime);
   headers.set("cache-control", "private, max-age=0, no-store");
-  // Helpful for debugging in DevTools — surface which format we picked.
   headers.set("x-yt-mp3-itag", String(format.itag));
   if (format.mime_type) {
     headers.set("x-yt-mp3-mime", format.mime_type);
   }
 
-  // Cancel the upstream stream if the client disconnects mid-download.
-  // SvelteKit/Node won't do this automatically — without it, an
-  // aborted browser request keeps the googlevideo connection open
-  // until completion, which wastes bandwidth and a serverless invocation.
-  const abort = new AbortController();
+  // Cancel the upstream googlevideo connection if the browser
+  // disconnects mid-download. SvelteKit/Node won't do this
+  // automatically — without it, an aborted request keeps the
+  // upstream socket open until completion, wasting bandwidth.
   request.signal.addEventListener("abort", () => {
-    abort.abort();
     audioStream.cancel().catch(() => {
       /* already done — ignore */
     });
